@@ -3,9 +3,10 @@
 #include <DallasTemperature.h>
 #include <Wire.h>
 #include <Adafruit_ADS1X15.h>
+#include <ArduinoJson.h>
 
 // Serial.printf("Task1 Stack Free: %u bytes\n", uxTaskGetStackHighWaterMark(NULL));
-
+#define DEBUG 1
 //TASK INTERVALS
 #define LIQUID_SENSE_INTERVAL_MS 1000
 #define TEMP_SENSE_INTERVAL_MS 2000
@@ -112,6 +113,12 @@ constexpr uint8_t dutyCycles[7] = {
 constexpr int NUM_SPEED_LEVELS = 7;
 void setPumpSpeed(uint8_t speedLevel);
 void setupPump();
+
+struct STATE_DATA
+{
+  /* data */
+};
+
 
 void setup() {  
   Serial.begin(115200);
@@ -349,5 +356,15 @@ void readPressureSensorsTask(void* pvParameters){
     P_READINGS[3] = readPressureChannel(ADS1X15_REG_CONFIG_MUX_DIFF_0_3);
     P_READINGS[3] = readPressureChannel(ADS1X15_REG_CONFIG_MUX_DIFF_1_3);
     vTaskDelay(PRESS_SENSE_INTERVAL_MS);
+  }
+}
+
+//MONITORING
+
+
+void reportDataTask(void* pvParameters){
+  for (;;)
+  {
+    
   }
 }
