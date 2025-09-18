@@ -6,6 +6,12 @@
 
 // Serial.printf("Task1 Stack Free: %u bytes\n", uxTaskGetStackHighWaterMark(NULL));
 
+//TASK INTERVALS
+#define LIQUID_SENSE_INTERVAL_MS 1000
+#define TEMP_SENSE_INTERVAL_MS 2000
+#define PRESS_SENSE_INTERVAL_MS pdMS_TO_TICKS(2000)
+#define PRESS_SENSE_TIME_MS pdMS_TO_TICKS(140)
+
 enum TEMPERATURE_STATE {HOT, GOOD, COLD};
 #define T_PROBE_COUNT 5
 #define L_SENSOR_COUNT 6
@@ -27,13 +33,19 @@ constexpr uint8_t I2C_SCL = 9;
 //Pump control pin / channel
 constexpr uint8_t  PUMP_PWM_PIN = 6; //RTC_GPIO6, GPIO6, TOUCH6, ADC1_CH5	
 //TEMPERATURE MONITORING
+void readTProbesTask(void* pvParameters);
 OneWire oneWire(oneWireBus);
 DallasTemperature sensors(&oneWire);
 uint8_t devicesFound;
-DeviceAddress deviceAddresses[T_PROBE_COUNT];
+DeviceAddress deviceAddresses[T_PROBE_COUNT] = {{0x28, 0x6B, 0xB2, 0x5A, 0x00, 0x00, 0x00, 0x2A}, 
+                                                {0x28, 0x20, 0x1C, 0x5A, 0x00, 0x00, 0x00, 0x36}, 
+                                                {0x28, 0x13, 0x74, 0x58, 0x00, 0x00, 0x00, 0xAA}, 
+                                                {0x28, 0x1D, 0x8D, 0x5A, 0x00, 0x00, 0x00, 0xEB}, 
+                                                {0x28, 0x61, 0x17, 0x59, 0x00, 0x00, 0x00, 0x8C}
+                                              };
 constexpr int WAIT_FOR_CONVERSION = pdMS_TO_TICKS(376);
 static TEMPERATURE_STATE T_STATE;
-static float T_READINGS[T_PROBE_COUNT];
+static float T_READINGS[T_PROBE_COUNT] = {1.f, 2.f, 3.f, 4.f, 5.f};
 
 //RELAY HEATER CONTROL
 constexpr float LOW_TEMP = 95.f;
@@ -64,7 +76,7 @@ static uint8_t L_SENSOR_STATES = 0b0011'1111; // 1 = above waterline, 0 = submer
 
 void readLSensor(const uint8_t sensorPin, uint8_t& sensorState, const uint8_t sensorBitmask);
 void scanLSensors(const uint8_t* sensorPins, uint8_t& sensorState, const uint8_t* sensorBitmasks, const uint8_t powerPin, uint8_t count);
-
+void scanLSensorsTask(void* pvParameters);
 //temperature monitoring
 ////////////
 
@@ -78,8 +90,10 @@ void HeaterControlFunction(uint8_t HeaterPin, const TEMPERATURE_STATE&);
 
 //Pressure Monitoring
 Adafruit_ADS1115 PADC;
-int16_t readPressureSensor(uint8_t channel);
-
+float readPressureChannel(const uint16_t  channel);
+void readPressureSensorsTask(void* pvParameters);
+static int16_t P_READINGS[6] = {0, 1, 3, 
+                                301, 403, 513};
 //Pump PWM Settings
 constexpr int PWM_CHANNEL = 0;// LEDC channels = 0-15
 constexpr int PWM_FREQ = 5000; // module freq range = 20kHz
@@ -171,15 +185,7 @@ void loop() {
 }
 
 // put function definitions here:
-int16_t readPressureSensor(uint8_t channel) {
-  if (channel > 3) {
-    Serial.println("Invalid ADC channel.");
-    return 0;
-  }
-  int16_t adcValue = PADC.readADC_SingleEnded(channel);
-  return adcValue;
-}
-
+/* pointless code I'm not going to use.
 int16_t readDifferentialPressure(uint8_t inputA, uint8_t inputB) {
   int16_t diffValue;
   int args = inputA * 10 + inputB;
@@ -207,7 +213,7 @@ int16_t readDifferentialPressure(uint8_t inputA, uint8_t inputB) {
   }
   return diffValue;
 }
-
+*/
 void readTProbes(const DeviceAddress (&Taddrs)[T_PROBE_COUNT], float (&TVals)[T_PROBE_COUNT]){
   sensors.requestTemperatures();
   vTaskDelay(WAIT_FOR_CONVERSION);
@@ -279,6 +285,7 @@ void scanLSensors(const uint8_t* sensorPins, uint8_t& sensorState, const uint8_t
   }
   digitalWrite(powerPin, LOW);
 }
+
 void setPumpSpeed(uint8_t speedLevel) {
 // Constrain input to valid range
   if (speedLevel == 255) { //in case of overflow
@@ -298,4 +305,49 @@ void setupPump() {
 
     // Set the initial speed to OFF
     setPumpSpeed(0);
+}
+
+// TASKS
+// LIQUID LEVEL MONITOR
+void scanLSensorsTask(void* pvParameters){
+  for (;;)
+  {
+    scanLSensors(L_SENSE_PINS, L_SENSOR_STATES, L_SensorBitmasks, L_SENSE_PWR_PIN, L_SENSOR_COUNT);
+    vTaskDelay(pdMS_TO_TICKS(LIQUID_SENSE_INTERVAL_MS));
+  }
+}
+// TEMPERATURE MONITOR
+void readTProbesTask(void* pvParameters){
+  for (;;)
+  {
+    readTProbes(deviceAddresses, T_READINGS);
+    vTaskDelay(pdMS_TO_TICKS(TEMP_SENSE_INTERVAL_MS));
+  }
+}
+// PRESSURE MONITOR
+float readPressureChannel(const uint16_t channel){
+  PADC.startADCReading(channel, false);
+  vTaskDelay(PRESS_SENSE_TIME_MS);
+  int16_t adc_raw = PADC.getLastConversionResults();
+  return PADC.computeVolts(adc_raw);
+}
+
+
+void readPressureSensorsTask(void* pvParameters){
+  for (;;)
+  { 
+    //SINGLE ENDED
+    PADC.setGain(GAIN_TWOTHIRDS);
+    P_READINGS[0] = readPressureChannel(MUX_BY_CHANNEL[0]);
+    P_READINGS[1] = readPressureChannel(MUX_BY_CHANNEL[1]);
+    P_READINGS[2] = readPressureChannel(MUX_BY_CHANNEL[3]);
+    vTaskDelay(PRESS_SENSE_INTERVAL_MS);
+
+    //DIFFERENTIAL
+    PADC.setGain(GAIN_TWO);
+    P_READINGS[3] = readPressureChannel(ADS1X15_REG_CONFIG_MUX_DIFF_0_1);
+    P_READINGS[3] = readPressureChannel(ADS1X15_REG_CONFIG_MUX_DIFF_0_3);
+    P_READINGS[3] = readPressureChannel(ADS1X15_REG_CONFIG_MUX_DIFF_1_3);
+    vTaskDelay(PRESS_SENSE_INTERVAL_MS);
+  }
 }
