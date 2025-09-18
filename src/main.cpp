@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <esp_timer.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <Wire.h>
@@ -12,6 +13,7 @@
 #define TEMP_SENSE_INTERVAL_MS 2000
 #define PRESS_SENSE_INTERVAL_MS pdMS_TO_TICKS(2000)
 #define PRESS_SENSE_TIME_MS pdMS_TO_TICKS(140)
+#define LOG_INTERVAL pdMS_TO_TICKS(1100)
 
 enum TEMPERATURE_STATE {HOT, GOOD, COLD};
 #define T_PROBE_COUNT 5
@@ -111,13 +113,15 @@ constexpr uint8_t dutyCycles[7] = {
     255  //idx6: 16.0V
 };
 constexpr int NUM_SPEED_LEVELS = 7;
+static uint8_t pumpspeedLevel= 0;
 void setPumpSpeed(uint8_t speedLevel);
 void setupPump();
 
-struct STATE_DATA
-{
-  /* data */
-};
+void sendDataAsJSON(const TEMPERATURE_STATE& T_ST,
+                    const float (&T_READINGS)[T_PROBE_COUNT], 
+                    const uint8_t &L_STATE, 
+                    const int16_t (&P_R)[6], 
+                    const uint8_t &pumpSp);
 
 
 void setup() {  
@@ -188,39 +192,9 @@ void setup() {
 
 
 void loop() {
-  // put your main code here, to run repeatedly:
+  vTaskDelay(1000);
 }
 
-// put function definitions here:
-/* pointless code I'm not going to use.
-int16_t readDifferentialPressure(uint8_t inputA, uint8_t inputB) {
-  int16_t diffValue;
-  int args = inputA * 10 + inputB;
-  switch (args)
-  {
-  case 01:
-  case 10:
-    diffValue = PADC.readADC_Differential_0_1();
-    break;
-  case 03:
-  case 30:
-    diffValue = PADC.readADC_Differential_0_3();
-    break;
-  case 13:
-  case 31:
-    diffValue = PADC.readADC_Differential_1_3();
-    break;
-  case 23:
-  case 32:
-    diffValue = PADC.readADC_Differential_2_3();
-    break;
-  default:
-    Serial.println("Invalid ADC channels.");
-    return 0;
-  }
-  return diffValue;
-}
-*/
 void readTProbes(const DeviceAddress (&Taddrs)[T_PROBE_COUNT], float (&TVals)[T_PROBE_COUNT]){
   sensors.requestTemperatures();
   vTaskDelay(WAIT_FOR_CONVERSION);
@@ -229,6 +203,12 @@ void readTProbes(const DeviceAddress (&Taddrs)[T_PROBE_COUNT], float (&TVals)[T_
     TVals[i] = sensors.getTempC(Taddrs[i]);
     vTaskDelay(WAIT_FOR_CONVERSION);
   }
+  if (TVals[0] <= LOW_TEMP)
+    {T_STATE = COLD;}
+  else if (TVals[0] >= HIGH_TEMP)
+    {T_STATE = HOT;}
+  else
+    {T_STATE = GOOD;}  
 }
 
 void maintainTemperature(uint8_t HeaterPin, const float currentTemp){
@@ -253,10 +233,9 @@ void maintainTemperature(uint8_t HeaterPin, const float currentTemp){
   digitalWrite(HeaterPin, LOW);
   vTaskDelay(pdMS_TO_TICKS(offTime));
 }
-
+/* INLINED
 void HeaterControlFunction(uint8_t SSRPin, const TEMPERATURE_STATE& T_S){
-  for (;;)
-  {
+  
     switch (T_S){
       case COLD:
         digitalWrite(SSRPin, HIGH);
@@ -273,9 +252,7 @@ void HeaterControlFunction(uint8_t SSRPin, const TEMPERATURE_STATE& T_S){
         vTaskDelay(HEAT_CYCLE_TIME);
         break;
     }
-  }
-  
-}
+}*/
 
 void readLSensor(const uint8_t sensorPin, uint8_t& sensorStates, const uint8_t sensorBitmask) {
   sensorStates = (sensorStates & ~sensorBitmask) | (digitalRead(sensorPin) * sensorBitmask); //select relevent bit and update with sensor reading
@@ -303,6 +280,7 @@ void setPumpSpeed(uint8_t speedLevel) {
   }
   // Set the PWM duty cycle for the selected speed
   ledcWrite(PWM_CHANNEL, dutyCycles[speedLevel]);
+  pumpspeedLevel = speedLevel;
 }
 
 void setupPump() {
@@ -323,6 +301,39 @@ void scanLSensorsTask(void* pvParameters){
     vTaskDelay(pdMS_TO_TICKS(LIQUID_SENSE_INTERVAL_MS));
   }
 }
+//LIQUID LEVEL CONTROL
+void boilerLevelTask(void* pvParameters){
+  for (;;)
+  {
+    switch (L_SENSOR_STATES)
+    {
+    case BELOW:
+    case LEVEL_1:
+    case LEVEL_2:
+      setPumpSpeed(0);
+      vTaskDelay(pdMS_TO_TICKS(5000));
+      break;
+    case LEVEL_3:
+      setPumpSpeed(1);
+      vTaskDelay(pdMS_TO_TICKS(500));
+      break;
+    case LEVEL_4:
+      setPumpSpeed(2);
+      vTaskDelay(pdMS_TO_TICKS(500));
+      break;
+    case LEVEL_5:
+      setPumpSpeed(3);
+      vTaskDelay(pdMS_TO_TICKS(400));
+      break;
+    case ABOVE:
+      setPumpSpeed(6);
+      vTaskDelay(pdMS_TO_TICKS(200));
+      break;
+    default:
+      vTaskDelay(pdMS_TO_TICKS(1000));
+      break;
+    }
+}
 // TEMPERATURE MONITOR
 void readTProbesTask(void* pvParameters){
   for (;;)
@@ -331,6 +342,29 @@ void readTProbesTask(void* pvParameters){
     vTaskDelay(pdMS_TO_TICKS(TEMP_SENSE_INTERVAL_MS));
   }
 }
+//TEMPERATURE CONTROL
+void HeaterControlTask(void* pvParameters){
+  for (;;)
+  {
+    switch (T_STATE){
+      case COLD:
+        digitalWrite(HeatRelayPin, HIGH);
+        vTaskDelay(HEAT_CYCLE_TIME);
+        break;
+
+      case GOOD:
+        maintainTemperature(HeatRelayPin, T_READINGS[0]);
+        break;
+      
+      case HOT:
+      default:
+        digitalWrite(HeatRelayPin, LOW);
+        vTaskDelay(HEAT_CYCLE_TIME);
+        break;
+    }
+  }
+}
+
 // PRESSURE MONITOR
 float readPressureChannel(const uint16_t channel){
   PADC.startADCReading(channel, false);
@@ -360,11 +394,44 @@ void readPressureSensorsTask(void* pvParameters){
 }
 
 //MONITORING
+void sendDataAsJSON(const TEMPERATURE_STATE& T_ST, 
+                    const float (&T_READINGS)[T_PROBE_COUNT], 
+                    const uint8_t &L_STATE, 
+                    const int16_t (&P_R)[6], 
+                    const uint8_t &pumpSp){
+  JsonDocument doc;
+  doc["t"] = esp_timer_get_time();
 
+  JsonObject Temp_0 = doc["Temp"].add<JsonObject>();
+  Temp_0["T_state"] = T_ST;
+
+  JsonArray Temp_0_T_readings = Temp_0["T_readings"].to<JsonArray>();
+  Temp_0_T_readings.add(T_READINGS[0]);
+  Temp_0_T_readings.add(T_READINGS[1]);
+  Temp_0_T_readings.add(T_READINGS[2]);
+  Temp_0_T_readings.add(T_READINGS[3]);
+  Temp_0_T_readings.add(T_READINGS[4]);
+
+  doc["L_state"] = L_STATE;
+
+  JsonArray P_readings = doc["P_readings"].to<JsonArray>();
+  P_readings.add(P_R[0]);
+  P_readings.add(P_R[1]);
+  P_readings.add(P_R[2]);
+  P_readings.add(P_R[3]);
+  P_readings.add(P_R[4]);
+  P_readings.add(P_R[5]);
+
+  doc["pump"] = pumpSp;
+  
+  doc.shrinkToFit();
+  serializeJson(doc, Serial);
+}
 
 void reportDataTask(void* pvParameters){
   for (;;)
   {
-    
+    sendDataAsJSON(T_STATE, T_READINGS, L_SENSOR_STATES, P_READINGS, pumpspeedLevel);
+    vTaskDelay(LOG_INTERVAL);
   }
 }
