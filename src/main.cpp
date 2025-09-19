@@ -7,10 +7,9 @@
 #include <ArduinoJson.h>
 
 // Serial.printf("Task1 Stack Free: %u bytes\n", uxTaskGetStackHighWaterMark(NULL));
-#define DEBUG 1
 //TASK INTERVALS
-#define LIQUID_SENSE_INTERVAL_MS 1000
-#define TEMP_SENSE_INTERVAL_MS 2000
+#define LIQUID_SENSE_INTERVAL_MS pdMS_TO_TICKS(1000)
+#define TEMP_SENSE_INTERVAL_MS pdMS_TO_TICKS(2000)
 #define PRESS_SENSE_INTERVAL_MS pdMS_TO_TICKS(2000)
 #define PRESS_SENSE_TIME_MS pdMS_TO_TICKS(140)
 #define LOG_INTERVAL pdMS_TO_TICKS(1100)
@@ -18,6 +17,8 @@
 enum TEMPERATURE_STATE {HOT, GOOD, COLD};
 #define T_PROBE_COUNT 5
 #define L_SENSOR_COUNT 6
+#define P_SENSOR_COUNT 3
+#define P_SENSOR_COMBS 6
 //PIN ASSIGNMENTS
 constexpr uint8_t HeatRelayPin = 5;
 constexpr int oneWireBus = 4; // bus for the temperature sensors
@@ -37,6 +38,7 @@ constexpr uint8_t I2C_SCL = 9;
 constexpr uint8_t  PUMP_PWM_PIN = 6; //RTC_GPIO6, GPIO6, TOUCH6, ADC1_CH5	
 //TEMPERATURE MONITORING
 void readTProbesTask(void* pvParameters);
+void HeaterControlTask(void* pvParameters);
 OneWire oneWire(oneWireBus);
 DallasTemperature sensors(&oneWire);
 uint8_t devicesFound;
@@ -80,6 +82,7 @@ static uint8_t L_SENSOR_STATES = 0b0011'1111; // 1 = above waterline, 0 = submer
 void readLSensor(const uint8_t sensorPin, uint8_t& sensorState, const uint8_t sensorBitmask);
 void scanLSensors(const uint8_t* sensorPins, uint8_t& sensorState, const uint8_t* sensorBitmasks, const uint8_t powerPin, uint8_t count);
 void scanLSensorsTask(void* pvParameters);
+void boilerLevelTask(void* pvParameters);
 //temperature monitoring
 ////////////
 
@@ -89,13 +92,12 @@ void readTProbes(const DeviceAddress (&Taddrs)[T_PROBE_COUNT], float (&Tvals)[T_
 ////////////
 
 void maintainTemperature(uint8_t HeaterPin, const float currentTemp);
-void HeaterControlFunction(uint8_t HeaterPin, const TEMPERATURE_STATE&);
 
 //Pressure Monitoring
 Adafruit_ADS1115 PADC;
-float readPressureChannel(const uint16_t  channel);
+int16_t readPressureChannel(const uint16_t  channel);
 void readPressureSensorsTask(void* pvParameters);
-static int16_t P_READINGS[6] = {0, 1, 3, 
+static int16_t P_READINGS[P_SENSOR_COMBS] = {0, 1, 3, 
                                 301, 403, 513};
 //Pump PWM Settings
 constexpr int PWM_CHANNEL = 0;// LEDC channels = 0-15
@@ -122,6 +124,7 @@ void sendDataAsJSON(const TEMPERATURE_STATE& T_ST,
                     const uint8_t &L_STATE, 
                     const int16_t (&P_R)[6], 
                     const uint8_t &pumpSp);
+void reportDataTask(void* pvParameters);
 
 
 void setup() {  
@@ -197,11 +200,8 @@ void loop() {
 
 void readTProbes(const DeviceAddress (&Taddrs)[T_PROBE_COUNT], float (&TVals)[T_PROBE_COUNT]){
   sensors.requestTemperatures();
-  vTaskDelay(WAIT_FOR_CONVERSION);
-
   for (int i = 0; i < T_PROBE_COUNT; ++i){
     TVals[i] = sensors.getTempC(Taddrs[i]);
-    vTaskDelay(WAIT_FOR_CONVERSION);
   }
   if (TVals[0] <= LOW_TEMP)
     {T_STATE = COLD;}
@@ -222,37 +222,17 @@ void maintainTemperature(uint8_t HeaterPin, const float currentTemp){
   // Apply the power in 2 cycles
   
   digitalWrite(HeaterPin, HIGH);
-  vTaskDelay(pdMS_TO_TICKS(onTime));
+  vTaskDelay(onTime);
   
   digitalWrite(HeaterPin, LOW);
-  vTaskDelay(pdMS_TO_TICKS(offTime));
+  vTaskDelay(offTime);
 
   digitalWrite(HeaterPin, HIGH);
-  vTaskDelay(pdMS_TO_TICKS(onTime));
+  vTaskDelay(onTime);
   
   digitalWrite(HeaterPin, LOW);
-  vTaskDelay(pdMS_TO_TICKS(offTime));
+  vTaskDelay(offTime);
 }
-/* INLINED
-void HeaterControlFunction(uint8_t SSRPin, const TEMPERATURE_STATE& T_S){
-  
-    switch (T_S){
-      case COLD:
-        digitalWrite(SSRPin, HIGH);
-        vTaskDelay(HEAT_CYCLE_TIME);
-        break;
-
-      case GOOD:
-        maintainTemperature(SSRPin, T_READINGS[0]);
-        break;
-      
-      case HOT:
-      default:
-        digitalWrite(HeatRelayPin, LOW);
-        vTaskDelay(HEAT_CYCLE_TIME);
-        break;
-    }
-}*/
 
 void readLSensor(const uint8_t sensorPin, uint8_t& sensorStates, const uint8_t sensorBitmask) {
   sensorStates = (sensorStates & ~sensorBitmask) | (digitalRead(sensorPin) * sensorBitmask); //select relevent bit and update with sensor reading
@@ -261,11 +241,11 @@ void readLSensor(const uint8_t sensorPin, uint8_t& sensorStates, const uint8_t s
 
 void scanLSensors(const uint8_t* sensorPins, uint8_t& sensorState, const uint8_t* sensorBitmasks, const uint8_t powerPin, uint8_t count) {
   digitalWrite(powerPin, HIGH);
-  vTaskDelay(pdMS_TO_TICKS(60)); 
+  delayMicroseconds(DELAYBETWEENREADS);
 
   for (uint8_t i = 0; i < count; ++i) {
     readLSensor(sensorPins[i], sensorState, sensorBitmasks[i]);
-    vTaskDelay(pdMS_TO_TICKS(DELAYBETWEENREADS));
+    delayMicroseconds(DELAYBETWEENREADS);
   }
   digitalWrite(powerPin, LOW);
 }
@@ -298,7 +278,7 @@ void scanLSensorsTask(void* pvParameters){
   for (;;)
   {
     scanLSensors(L_SENSE_PINS, L_SENSOR_STATES, L_SensorBitmasks, L_SENSE_PWR_PIN, L_SENSOR_COUNT);
-    vTaskDelay(pdMS_TO_TICKS(LIQUID_SENSE_INTERVAL_MS));
+    vTaskDelay(LIQUID_SENSE_INTERVAL_MS);
   }
 }
 //LIQUID LEVEL CONTROL
@@ -333,13 +313,14 @@ void boilerLevelTask(void* pvParameters){
       vTaskDelay(pdMS_TO_TICKS(1000));
       break;
     }
+  }
 }
 // TEMPERATURE MONITOR
 void readTProbesTask(void* pvParameters){
   for (;;)
   {
     readTProbes(deviceAddresses, T_READINGS);
-    vTaskDelay(pdMS_TO_TICKS(TEMP_SENSE_INTERVAL_MS));
+    vTaskDelay(TEMP_SENSE_INTERVAL_MS);
   }
 }
 //TEMPERATURE CONTROL
@@ -366,7 +347,7 @@ void HeaterControlTask(void* pvParameters){
 }
 
 // PRESSURE MONITOR
-float readPressureChannel(const uint16_t channel){
+int16_t readPressureChannel(const uint16_t channel){
   PADC.startADCReading(channel, false);
   vTaskDelay(PRESS_SENSE_TIME_MS);
   int16_t adc_raw = PADC.getLastConversionResults();
@@ -387,8 +368,8 @@ void readPressureSensorsTask(void* pvParameters){
     //DIFFERENTIAL
     PADC.setGain(GAIN_TWO);
     P_READINGS[3] = readPressureChannel(ADS1X15_REG_CONFIG_MUX_DIFF_0_1);
-    P_READINGS[3] = readPressureChannel(ADS1X15_REG_CONFIG_MUX_DIFF_0_3);
-    P_READINGS[3] = readPressureChannel(ADS1X15_REG_CONFIG_MUX_DIFF_1_3);
+    P_READINGS[4] = readPressureChannel(ADS1X15_REG_CONFIG_MUX_DIFF_0_3);
+    P_READINGS[5] = readPressureChannel(ADS1X15_REG_CONFIG_MUX_DIFF_1_3);
     vTaskDelay(PRESS_SENSE_INTERVAL_MS);
   }
 }
@@ -397,34 +378,28 @@ void readPressureSensorsTask(void* pvParameters){
 void sendDataAsJSON(const TEMPERATURE_STATE& T_ST, 
                     const float (&T_READINGS)[T_PROBE_COUNT], 
                     const uint8_t &L_STATE, 
-                    const int16_t (&P_R)[6], 
+                    const int16_t (&P_R)[P_SENSOR_COMBS], 
                     const uint8_t &pumpSp){
   JsonDocument doc;
   doc["t"] = esp_timer_get_time();
 
-  JsonObject Temp_0 = doc["Temp"].add<JsonObject>();
+    JsonObject Temp_0 = doc["Temp"].to<JsonObject>();
   Temp_0["T_state"] = T_ST;
 
   JsonArray Temp_0_T_readings = Temp_0["T_readings"].to<JsonArray>();
-  Temp_0_T_readings.add(T_READINGS[0]);
-  Temp_0_T_readings.add(T_READINGS[1]);
-  Temp_0_T_readings.add(T_READINGS[2]);
-  Temp_0_T_readings.add(T_READINGS[3]);
-  Temp_0_T_readings.add(T_READINGS[4]);
+  for (int i = 0; i < T_PROBE_COUNT; ++i) {
+    Temp_0_T_readings.add(T_READINGS[i]);
+  }
 
   doc["L_state"] = L_STATE;
 
   JsonArray P_readings = doc["P_readings"].to<JsonArray>();
-  P_readings.add(P_R[0]);
-  P_readings.add(P_R[1]);
-  P_readings.add(P_R[2]);
-  P_readings.add(P_R[3]);
-  P_readings.add(P_R[4]);
-  P_readings.add(P_R[5]);
+  for (int i = 0; i < P_SENSOR_COMBS; ++i) {
+    P_readings.add(P_R[i]);
+  }
 
   doc["pump"] = pumpSp;
   
-  doc.shrinkToFit();
   serializeJson(doc, Serial);
 }
 
