@@ -38,7 +38,7 @@ constexpr uint8_t I2C_SCL = 9;
 constexpr uint8_t  PUMP_PWM_PIN = 6; //RTC_GPIO6, GPIO6, TOUCH6, ADC1_CH5	
 //TEMPERATURE MONITORING
 void readTProbesTask(void* pvParameters);
-void HeaterControlTask(void* pvParameters);
+void heaterControlTask(void* pvParameters);
 OneWire oneWire(oneWireBus);
 DallasTemperature sensors(&oneWire);
 uint8_t devicesFound;
@@ -95,9 +95,9 @@ void maintainTemperature(uint8_t HeaterPin, const float currentTemp);
 
 //Pressure Monitoring
 Adafruit_ADS1115 PADC;
-int16_t readPressureChannel(const uint16_t  channel);
+float readPressureChannel(const uint16_t  channel);
 void readPressureSensorsTask(void* pvParameters);
-static int16_t P_READINGS[P_SENSOR_COMBS] = {0, 1, 3, 
+static float P_READINGS[P_SENSOR_COMBS] = {0, 1, 3, 
                                 301, 403, 513};
 //Pump PWM Settings
 constexpr int PWM_CHANNEL = 0;// LEDC channels = 0-15
@@ -126,6 +126,15 @@ void sendDataAsJSON(const TEMPERATURE_STATE& T_ST,
                     const uint8_t &pumpSp);
 void reportDataTask(void* pvParameters);
 
+////////////////
+//TASK HANDLES//
+////////////////
+TaskHandle_t scanLSensorsTaskHandle = NULL;
+TaskHandle_t boilerLevelTaskHandle = NULL;
+TaskHandle_t readTProbesTaskHandle = NULL;
+TaskHandle_t heaterControlTaskHandle = NULL;
+TaskHandle_t readPressureSensorsTaskHandle = NULL;
+TaskHandle_t reportDataTaskHandle = NULL;
 
 void setup() {  
   Serial.begin(115200);
@@ -134,18 +143,18 @@ void setup() {
     delay(20);
   }
   delay(1000);
-  Serial.println("Serial connection established.");
+  Serial.println("DBG:Serial connection established.");
 
   //TEMPERATURE PROBES
   sensors.begin();
   devicesFound = sensors.getDeviceCount();
-  Serial.print("Number of devices found: ");
+  Serial.print("DBG: Number of devices found: ");
   Serial.println(devicesFound);
 
   // Device enumeration
   for (uint8_t i = 0; i < devicesFound; i++) {
     if (sensors.getAddress(deviceAddresses[i], i)) { // Save the address of each device to the deviceAddresses array
-      Serial.print("Device ");
+      Serial.print("DBG: Device ");
       Serial.print(i);
       Serial.print(" address: "); // Print the address of each device
       for (uint8_t j = 0; j < 8; j++) {
@@ -158,7 +167,7 @@ void setup() {
   }
 
   if(devicesFound != T_PROBE_COUNT){
-    Serial.println("SOME TEMPERATURE PROBES ARE MISSING!");
+    Serial.println("DBG: SOME TEMPERATURE PROBES ARE MISSING!");
   }
   sensors.setResolution(11); // 11 bit = 375ms delay for conversion
 
@@ -173,26 +182,32 @@ void setup() {
   pinMode(L_SENSE_PWR_PIN, OUTPUT);
   digitalWrite(L_SENSE_PWR_PIN, LOW); // Depower sensor wires
   delayMicroseconds(100);
-  Serial.println("Level sensors initialized.");
+  Serial.println("DBG: Level sensors initialized.");
 
   //Setup pressure sensors:
   ////////////////////////
    Wire.begin(I2C_SDA, I2C_SCL);
-  Serial.println("I2C interface initialized.");
+  Serial.println("DBG: I2C interface initialized.");
 
   if (!PADC.begin()) {
-    Serial.println("Failed to find ADS1115 chip. Check wiring and address.");
+    Serial.println("DBG: Failed to find ADS1115 chip.");
     while (1); // Halt execution if sensor isn't found
   }
-  Serial.println("Pressure ADC initialized.");
+  Serial.println("DBG: Pressure ADC initialized.");
 
   //Setup pump:
   /////////////
   setupPump();
-  Serial.println("Pump initialized.");
+  Serial.println("DBG: Pump initialized.");
+
+  //Start Tasks
+  xTaskCreate(scanLSensorsTask, "scanLSensorsTask", 10240, NULL, 10, &scanLSensorsTaskHandle);
+  xTaskCreate(boilerLevelTask, "boilerLevelTask", 10240, NULL, 5, &boilerLevelTaskHandle);
+  xTaskCreate(readTProbesTask, "readTProbesTask", 10240, NULL, 10, &readTProbesTaskHandle);
+  xTaskCreate(heaterControlTask, "heaterControlTask", 10240, NULL, 8, &heaterControlTaskHandle);
+  xTaskCreate(readPressureSensorsTask, "readPSensorsTask", 10240, NULL, 10, &readPressureSensorsTaskHandle);
+  xTaskCreate(reportDataTask, "reportDataTask", 10240, NULL, 10, &reportDataTaskHandle);
 }
-
-
 
 void loop() {
   vTaskDelay(1000);
@@ -278,6 +293,8 @@ void scanLSensorsTask(void* pvParameters){
   for (;;)
   {
     scanLSensors(L_SENSE_PINS, L_SENSOR_STATES, L_SensorBitmasks, L_SENSE_PWR_PIN, L_SENSOR_COUNT);
+    Serial.printf("DBG: LSTFree %u byt\n", uxTaskGetStackHighWaterMark(NULL));
+
     vTaskDelay(LIQUID_SENSE_INTERVAL_MS);
   }
 }
@@ -291,19 +308,19 @@ void boilerLevelTask(void* pvParameters){
     case LEVEL_1:
     case LEVEL_2:
       setPumpSpeed(0);
-      vTaskDelay(pdMS_TO_TICKS(5000));
+      vTaskDelay(pdMS_TO_TICKS(2000));
       break;
     case LEVEL_3:
       setPumpSpeed(1);
-      vTaskDelay(pdMS_TO_TICKS(500));
+      vTaskDelay(pdMS_TO_TICKS(300));
       break;
     case LEVEL_4:
       setPumpSpeed(2);
-      vTaskDelay(pdMS_TO_TICKS(500));
+      vTaskDelay(pdMS_TO_TICKS(300));
       break;
     case LEVEL_5:
       setPumpSpeed(3);
-      vTaskDelay(pdMS_TO_TICKS(400));
+      vTaskDelay(pdMS_TO_TICKS(300));
       break;
     case ABOVE:
       setPumpSpeed(6);
@@ -313,6 +330,7 @@ void boilerLevelTask(void* pvParameters){
       vTaskDelay(pdMS_TO_TICKS(1000));
       break;
     }
+    Serial.printf("DBG: BLTFree %u byt\n", uxTaskGetStackHighWaterMark(NULL));
   }
 }
 // TEMPERATURE MONITOR
@@ -320,11 +338,12 @@ void readTProbesTask(void* pvParameters){
   for (;;)
   {
     readTProbes(deviceAddresses, T_READINGS);
+    Serial.printf("DBG: RTPTFree %u byt\n", uxTaskGetStackHighWaterMark(NULL));
     vTaskDelay(TEMP_SENSE_INTERVAL_MS);
   }
 }
 //TEMPERATURE CONTROL
-void HeaterControlTask(void* pvParameters){
+void heaterControlTask(void* pvParameters){
   for (;;)
   {
     switch (T_STATE){
@@ -343,11 +362,12 @@ void HeaterControlTask(void* pvParameters){
         vTaskDelay(HEAT_CYCLE_TIME);
         break;
     }
+  Serial.printf("DBG: HCTFree %u byt\n", uxTaskGetStackHighWaterMark(NULL));
   }
 }
 
 // PRESSURE MONITOR
-int16_t readPressureChannel(const uint16_t channel){
+float readPressureChannel(const uint16_t channel){
   PADC.startADCReading(channel, false);
   vTaskDelay(PRESS_SENSE_TIME_MS);
   int16_t adc_raw = PADC.getLastConversionResults();
@@ -370,6 +390,7 @@ void readPressureSensorsTask(void* pvParameters){
     P_READINGS[3] = readPressureChannel(ADS1X15_REG_CONFIG_MUX_DIFF_0_1);
     P_READINGS[4] = readPressureChannel(ADS1X15_REG_CONFIG_MUX_DIFF_0_3);
     P_READINGS[5] = readPressureChannel(ADS1X15_REG_CONFIG_MUX_DIFF_1_3);
+    Serial.printf("DBG: RPSTFree %u byt\n", uxTaskGetStackHighWaterMark(NULL));
     vTaskDelay(PRESS_SENSE_INTERVAL_MS);
   }
 }
@@ -378,7 +399,7 @@ void readPressureSensorsTask(void* pvParameters){
 void sendDataAsJSON(const TEMPERATURE_STATE& T_ST, 
                     const float (&T_READINGS)[T_PROBE_COUNT], 
                     const uint8_t &L_STATE, 
-                    const int16_t (&P_R)[P_SENSOR_COMBS], 
+                    const float (&P_R)[P_SENSOR_COMBS], 
                     const uint8_t &pumpSp){
   JsonDocument doc;
   doc["t"] = esp_timer_get_time();
@@ -407,6 +428,7 @@ void reportDataTask(void* pvParameters){
   for (;;)
   {
     sendDataAsJSON(T_STATE, T_READINGS, L_SENSOR_STATES, P_READINGS, pumpspeedLevel);
+    Serial.printf("DBG: RDTFree %u byt\n", uxTaskGetStackHighWaterMark(NULL));
     vTaskDelay(LOG_INTERVAL);
   }
 }
