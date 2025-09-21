@@ -6,13 +6,13 @@
 #include <Adafruit_ADS1X15.h>
 #include <ArduinoJson.h>
 
-// Serial.printf("Task1 Stack Free: %u bytes\n", uxTaskGetStackHighWaterMark(NULL));
 //TASK INTERVALS
-#define LIQUID_SENSE_INTERVAL_MS pdMS_TO_TICKS(1000)
+#define LIQUID_SENSE_INTERVAL_MS pdMS_TO_TICKS(500)
+#define BOILER_PUMP_INTERVAL_MS pdMS_TO_TICKS(500)
 #define TEMP_SENSE_INTERVAL_MS pdMS_TO_TICKS(2000)
 #define PRESS_SENSE_INTERVAL_MS pdMS_TO_TICKS(2000)
 #define PRESS_SENSE_TIME_MS pdMS_TO_TICKS(140)
-#define LOG_INTERVAL pdMS_TO_TICKS(1100)
+#define LOG_INTERVAL pdMS_TO_TICKS(2000)
 
 enum TEMPERATURE_STATE {HOT, GOOD, COLD};
 #define T_PROBE_COUNT 5
@@ -122,7 +122,7 @@ void setupPump();
 void sendDataAsJSON(const TEMPERATURE_STATE& T_ST,
                     const float (&T_READINGS)[T_PROBE_COUNT], 
                     const uint8_t &L_STATE, 
-                    const int16_t (&P_R)[6], 
+                    const float (&P_R)[P_SENSOR_COMBS], 
                     const uint8_t &pumpSp);
 void reportDataTask(void* pvParameters);
 
@@ -140,9 +140,9 @@ void setup() {
   Serial.begin(115200);
   //Wait for serial communication.
   while (!Serial) {
-    delay(20);
+    vTaskDelay(20 / portTICK_PERIOD_MS);
   }
-  delay(1000);
+  vTaskDelay(1000 / portTICK_PERIOD_MS);
   Serial.println("DBG:Serial connection established.");
 
   //TEMPERATURE PROBES
@@ -193,6 +193,7 @@ void setup() {
     Serial.println("DBG: Failed to find ADS1115 chip.");
     while (1); // Halt execution if sensor isn't found
   }
+  PADC.setDataRate(RATE_ADS1115_8SPS); // 125 ms
   Serial.println("DBG: Pressure ADC initialized.");
 
   //Setup pump:
@@ -201,16 +202,16 @@ void setup() {
   Serial.println("DBG: Pump initialized.");
 
   //Start Tasks
-  xTaskCreate(scanLSensorsTask, "scanLSensorsTask", 10240, NULL, 10, &scanLSensorsTaskHandle);
-  xTaskCreate(boilerLevelTask, "boilerLevelTask", 10240, NULL, 5, &boilerLevelTaskHandle);
-  xTaskCreate(readTProbesTask, "readTProbesTask", 10240, NULL, 10, &readTProbesTaskHandle);
-  xTaskCreate(heaterControlTask, "heaterControlTask", 10240, NULL, 8, &heaterControlTaskHandle);
-  xTaskCreate(readPressureSensorsTask, "readPSensorsTask", 10240, NULL, 10, &readPressureSensorsTaskHandle);
-  xTaskCreate(reportDataTask, "reportDataTask", 10240, NULL, 10, &reportDataTaskHandle);
+  xTaskCreate(scanLSensorsTask, "scanLSensorsT", 8192, NULL, 8, &scanLSensorsTaskHandle);
+  xTaskCreate(boilerLevelTask, "boilerLevelT", 8192, NULL, 7, &boilerLevelTaskHandle);
+  xTaskCreate(readTProbesTask, "readTProbesT", 8192, NULL, 6, &readTProbesTaskHandle);
+  xTaskCreate(heaterControlTask, "heaterControlT", 8192, NULL, 5, &heaterControlTaskHandle);
+  xTaskCreate(readPressureSensorsTask, "readPSensorsT", 8192, NULL, 4, &readPressureSensorsTaskHandle);
+  xTaskCreate(reportDataTask, "reportDataT", 16384, NULL, 3, &reportDataTaskHandle);
 }
 
 void loop() {
-  vTaskDelay(1000);
+  vTaskDelay(10000);
 }
 
 void readTProbes(const DeviceAddress (&Taddrs)[T_PROBE_COUNT], float (&TVals)[T_PROBE_COUNT]){
@@ -308,29 +309,26 @@ void boilerLevelTask(void* pvParameters){
     case LEVEL_1:
     case LEVEL_2:
       setPumpSpeed(0);
-      vTaskDelay(pdMS_TO_TICKS(2000));
       break;
     case LEVEL_3:
       setPumpSpeed(1);
-      vTaskDelay(pdMS_TO_TICKS(300));
       break;
     case LEVEL_4:
       setPumpSpeed(2);
-      vTaskDelay(pdMS_TO_TICKS(300));
       break;
     case LEVEL_5:
       setPumpSpeed(3);
-      vTaskDelay(pdMS_TO_TICKS(300));
       break;
     case ABOVE:
       setPumpSpeed(6);
-      vTaskDelay(pdMS_TO_TICKS(200));
       break;
     default:
-      vTaskDelay(pdMS_TO_TICKS(1000));
+      setPumpSpeed(0);
+      Serial.println("DBG: UNKOWN LIQUID LEVEL!");
       break;
     }
     Serial.printf("DBG: BLTFree %u byt\n", uxTaskGetStackHighWaterMark(NULL));
+    vTaskDelay(BOILER_PUMP_INTERVAL_MS);
   }
 }
 // TEMPERATURE MONITOR
@@ -383,8 +381,6 @@ void readPressureSensorsTask(void* pvParameters){
     P_READINGS[0] = readPressureChannel(MUX_BY_CHANNEL[0]);
     P_READINGS[1] = readPressureChannel(MUX_BY_CHANNEL[1]);
     P_READINGS[2] = readPressureChannel(MUX_BY_CHANNEL[3]);
-    vTaskDelay(PRESS_SENSE_INTERVAL_MS);
-
     //DIFFERENTIAL
     PADC.setGain(GAIN_TWO);
     P_READINGS[3] = readPressureChannel(ADS1X15_REG_CONFIG_MUX_DIFF_0_1);
