@@ -14,6 +14,9 @@
 #define PRESS_SENSE_TIME_MS pdMS_TO_TICKS(140)
 #define LOG_INTERVAL pdMS_TO_TICKS(2000)
 
+#define PADC_ABS_GAIN GAIN_TWOTHIRDS
+#define PADC_DIFF_GAIN GAIN_ONE
+
 enum TEMPERATURE_STATE {HOT, GOOD, COLD};
 #define T_PROBE_COUNT 5
 #define L_SENSOR_COUNT 6
@@ -384,12 +387,12 @@ void readPressureSensorsTask(void* pvParameters){
   for (;;)
   { 
     //SINGLE ENDED
-    PADC.setGain(GAIN_TWOTHIRDS);
+    PADC.setGain(PADC_ABS_GAIN);
     P_READINGS[0] = readPressureChannel(MUX_BY_CHANNEL[0]);//Boiler Pressure (Absolute)
     P_READINGS[1] = readPressureChannel(MUX_BY_CHANNEL[1]);//Top Pressure (Absolute)
     P_READINGS[2] = readPressureChannel(MUX_BY_CHANNEL[3]);//Ambient Pressure
     //DIFFERENTIAL
-    PADC.setGain(GAIN_ONE);
+    PADC.setGain(PADC_DIFF_GAIN);
     P_READINGS[3] = readPressureChannel(ADS1X15_REG_CONFIG_MUX_DIFF_0_3);//Relative bottom pressure
     P_READINGS[4] = readPressureChannel(ADS1X15_REG_CONFIG_MUX_DIFF_1_3);//Relative top pressure
     PADC.setGain(GAIN_TWO);
