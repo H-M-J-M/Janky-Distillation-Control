@@ -14,8 +14,8 @@
 #define PRESS_SENSE_TIME_MS pdMS_TO_TICKS(140)
 #define LOG_INTERVAL pdMS_TO_TICKS(2000)
 
-#define PADC_ABS_GAIN GAIN_TWOTHIRDS
-#define PADC_DIFF_GAIN GAIN_ONE
+#define PADC_ABS_GAIN GAIN_TWO
+#define PADC_DIFF_GAIN GAIN_FOUR
 
 enum TEMPERATURE_STATE {HOT, GOOD, COLD};
 #define T_PROBE_COUNT 5
@@ -212,11 +212,11 @@ void setup() {
   Serial.println("DBG: Pump initialized.");
 
   //Start Tasks
-  xTaskCreate(scanLSensorsTask, "scanLSensorsT", 8192, NULL, 8, &scanLSensorsTaskHandle);
-  xTaskCreate(boilerLevelTask, "boilerLevelT", 8192, NULL, 7, &boilerLevelTaskHandle);
+  xTaskCreate(scanLSensorsTask, "scanLSensorsT", 6144, NULL, 8, &scanLSensorsTaskHandle);
+  xTaskCreate(boilerLevelTask, "boilerLevelT", 6144, NULL, 7, &boilerLevelTaskHandle);
   xTaskCreate(readTProbesTask, "readTProbesT", 8192, NULL, 6, &readTProbesTaskHandle);
-  xTaskCreate(heaterControlTask, "heaterControlT", 8192, NULL, 5, &heaterControlTaskHandle);
-  xTaskCreate(readPressureSensorsTask, "readPSensorsT", 8192, NULL, 4, &readPressureSensorsTaskHandle);
+  xTaskCreate(heaterControlTask, "heaterControlT", 6144, NULL, 5, &heaterControlTaskHandle);
+  xTaskCreate(readPressureSensorsTask, "readPSensorsT", 6144, NULL, 4, &readPressureSensorsTaskHandle);
   xTaskCreate(reportDataTask, "reportDataT", 16384, NULL, 3, &reportDataTaskHandle);
 }
 
@@ -304,7 +304,7 @@ void scanLSensorsTask(void* pvParameters){
   for (;;)
   {
     scanLSensors(L_SENSE_PINS, L_SENSOR_STATES, L_SensorBitmasks, L_SENSE_PWR_PIN, L_SENSOR_COUNT);
-    Serial.printf("DBG: LSTFree %u byt\n", uxTaskGetStackHighWaterMark(NULL));
+    //Serial.printf("DBG: LSTFree %u byt\n", uxTaskGetStackHighWaterMark(NULL));
 
     vTaskDelay(LIQUID_SENSE_INTERVAL_MS);
   }
@@ -337,7 +337,7 @@ void boilerLevelTask(void* pvParameters){
       Serial.println("DBG: UNKOWN LIQUID LEVEL!");
       break;
     }
-    Serial.printf("DBG: BLTFree %u byt\n", uxTaskGetStackHighWaterMark(NULL));
+    //Serial.printf("DBG: BLTFree %u byt\n", uxTaskGetStackHighWaterMark(NULL));
     vTaskDelay(BOILER_PUMP_INTERVAL_MS);
   }
 }
@@ -346,7 +346,7 @@ void readTProbesTask(void* pvParameters){
   for (;;)
   {
     readTProbes(deviceAddresses, T_READINGS);
-    Serial.printf("DBG: RTPTFree %u byt\n", uxTaskGetStackHighWaterMark(NULL));
+    //Serial.printf("DBG: RTPTFree %u byt\n", uxTaskGetStackHighWaterMark(NULL));
     vTaskDelay(TEMP_SENSE_INTERVAL_MS);
   }
 }
@@ -370,7 +370,7 @@ void heaterControlTask(void* pvParameters){
         vTaskDelay(HEAT_CYCLE_TIME);
         break;
     }
-  Serial.printf("DBG: HCTFree %u byt\n", uxTaskGetStackHighWaterMark(NULL));
+  //Serial.printf("DBG: HCTFree %u byt\n", uxTaskGetStackHighWaterMark(NULL));
   }
 }
 
@@ -398,7 +398,7 @@ void readPressureSensorsTask(void* pvParameters){
     PADC.setGain(GAIN_TWO);
     P_READINGS[5] = readPressureChannel(ADS1X15_REG_CONFIG_MUX_DIFF_0_1);//Pressure gradient in column
     
-    Serial.printf("DBG: RPSTFree %u byt\n", uxTaskGetStackHighWaterMark(NULL));
+    //Serial.printf("DBG: RPSTFree %u byt\n", uxTaskGetStackHighWaterMark(NULL));
     vTaskDelay(PRESS_SENSE_INTERVAL_MS);
   }
 }
@@ -436,7 +436,7 @@ void reportDataTask(void* pvParameters){
   for (;;)
   {
     sendDataAsJSON(T_STATE, T_READINGS, L_SENSOR_STATES, P_READINGS, pumpspeedLevel);
-    Serial.printf("DBG: RDTFree %u byt\n", uxTaskGetStackHighWaterMark(NULL));
+    //Serial.printf("DBG: RDTFree %u byt\n", uxTaskGetStackHighWaterMark(NULL));
     vTaskDelay(LOG_INTERVAL);
   }
 }
