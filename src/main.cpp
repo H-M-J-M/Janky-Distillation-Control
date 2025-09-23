@@ -42,11 +42,11 @@ void heaterControlTask(void* pvParameters);
 OneWire oneWire(oneWireBus);
 DallasTemperature sensors(&oneWire);
 uint8_t devicesFound;
-DeviceAddress deviceAddresses[T_PROBE_COUNT] = {{0x28, 0x6B, 0xB2, 0x5A, 0x00, 0x00, 0x00, 0x2A}, 
-                                                {0x28, 0x20, 0x1C, 0x5A, 0x00, 0x00, 0x00, 0x36}, 
-                                                {0x28, 0x13, 0x74, 0x58, 0x00, 0x00, 0x00, 0xAA}, 
-                                                {0x28, 0x1D, 0x8D, 0x5A, 0x00, 0x00, 0x00, 0xEB}, 
-                                                {0x28, 0x61, 0x17, 0x59, 0x00, 0x00, 0x00, 0x8C}
+DeviceAddress deviceAddresses[T_PROBE_COUNT] = {{0x28, 0x6B, 0xB2, 0x5A, 0x00, 0x00, 0x00, 0x2A},//BOILER     DONE
+                                                {0x28, 0x20, 0x1C, 0x5A, 0x00, 0x00, 0x00, 0x36},//TOP        DONE
+                                                {0x28, 0x13, 0x74, 0x58, 0x00, 0x00, 0x00, 0xAA},//FEED       DONE
+                                                {0x28, 0x1D, 0x8D, 0x5A, 0x00, 0x00, 0x00, 0xEB},//DISTILLATE 
+                                                {0x28, 0x61, 0x17, 0x59, 0x00, 0x00, 0x00, 0x8C}//AMBIENT     DONE
                                               };
 constexpr int WAIT_FOR_CONVERSION = pdMS_TO_TICKS(376);
 static TEMPERATURE_STATE T_STATE;
@@ -56,9 +56,18 @@ static float T_READINGS[T_PROBE_COUNT] = {1.f, 2.f, 3.f, 4.f, 5.f};
 constexpr float LOW_TEMP = 95.f;
 constexpr float HIGH_TEMP = 102.f;
 constexpr int HEAT_CYCLE_TIME = pdMS_TO_TICKS(5000); //Total length of a heating cycle (ms)
-constexpr float BOILER_TARGET_T = 100.f;
+constexpr float BOILER_TARGET_T = 99.f;
 
 //LIQUID LEVEL MONITORING
+/*
+Idea I didn't implement: You could improve error handling caused by bridged sensor wires if in addition to checking path to ground through the liquid
+you also checked for current flow from a sensor to it's adjacent sensors. To do this you would need to switch from using ground
+as the return path and instead use an OUTPUT LOW pin. This way the 'main' ground on the column exterior could be disconnected while
+the tests between pins are done. You would check a pair of adjacent wires by setting the lower wire to OUTPUT LOW and the higher wire
+would be checked in the current way (power pin OUTPUT HIGH, sensor pin INPUT). Logic and delays would be needed for settling time. 
+Some thought also needs to be put into whether this would actually behave equivalently to the current setup where a voltage divider 
+is created between ground and the INPUT pin, because OUTPUT LOW is not the same as ground.
+*/
 
 #define DELAYBETWEENREADS 60 //microseconds
 //liquid level bitmasks
@@ -151,19 +160,17 @@ void setup() {
   Serial.print("DBG: Number of devices found: ");
   Serial.println(devicesFound);
 
-  // Device enumeration
-  for (uint8_t i = 0; i < devicesFound; i++) {
-    if (sensors.getAddress(deviceAddresses[i], i)) { // Save the address of each device to the deviceAddresses array
-      Serial.print("DBG: Device ");
-      Serial.print(i);
-      Serial.print(" address: "); // Print the address of each device
+  // Temperature probe verification
+  for (uint8_t i = 0; i < T_PROBE_COUNT; i++) {
+    if (!sensors.isConnected(deviceAddresses[i])) {
+      Serial.print("DBG: device at address ");
       for (uint8_t j = 0; j < 8; j++) {
-                Serial.print(deviceAddresses[i][j], HEX);
-                Serial.print(" ");
-            }
-      Serial.println();
+        if (deviceAddresses[i][j] < 0x10) Serial.print("0");
+        Serial.print(deviceAddresses[i][j], HEX);
+        if (j < 7) Serial.print(" ");
+      }
+      Serial.println(" not found!");
     }
-
   }
 
   if(devicesFound != T_PROBE_COUNT){
@@ -378,14 +385,16 @@ void readPressureSensorsTask(void* pvParameters){
   { 
     //SINGLE ENDED
     PADC.setGain(GAIN_TWOTHIRDS);
-    P_READINGS[0] = readPressureChannel(MUX_BY_CHANNEL[0]);
-    P_READINGS[1] = readPressureChannel(MUX_BY_CHANNEL[1]);
-    P_READINGS[2] = readPressureChannel(MUX_BY_CHANNEL[3]);
+    P_READINGS[0] = readPressureChannel(MUX_BY_CHANNEL[0]);//Boiler Pressure (Absolute)
+    P_READINGS[1] = readPressureChannel(MUX_BY_CHANNEL[1]);//Top Pressure (Absolute)
+    P_READINGS[2] = readPressureChannel(MUX_BY_CHANNEL[3]);//Ambient Pressure
     //DIFFERENTIAL
+    PADC.setGain(GAIN_ONE);
+    P_READINGS[3] = readPressureChannel(ADS1X15_REG_CONFIG_MUX_DIFF_0_3);//Relative bottom pressure
+    P_READINGS[4] = readPressureChannel(ADS1X15_REG_CONFIG_MUX_DIFF_1_3);//Relative top pressure
     PADC.setGain(GAIN_TWO);
-    P_READINGS[3] = readPressureChannel(ADS1X15_REG_CONFIG_MUX_DIFF_0_1);
-    P_READINGS[4] = readPressureChannel(ADS1X15_REG_CONFIG_MUX_DIFF_0_3);
-    P_READINGS[5] = readPressureChannel(ADS1X15_REG_CONFIG_MUX_DIFF_1_3);
+    P_READINGS[5] = readPressureChannel(ADS1X15_REG_CONFIG_MUX_DIFF_0_1);//Pressure gradient in column
+    
     Serial.printf("DBG: RPSTFree %u byt\n", uxTaskGetStackHighWaterMark(NULL));
     vTaskDelay(PRESS_SENSE_INTERVAL_MS);
   }
