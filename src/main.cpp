@@ -38,7 +38,7 @@ constexpr uint8_t L_SENSE_PWR_PIN = 38;
 constexpr uint8_t I2C_SDA = 8;
 constexpr uint8_t I2C_SCL = 9;
 //Pump control pin / channel
-constexpr uint8_t  PUMP_PWM_PIN = 6; //RTC_GPIO6, GPIO6, TOUCH6, ADC1_CH5	
+constexpr uint8_t  PUMP_PWM_PIN = 36; //SPIIO7, GPIO36, FSPICLK
 //TEMPERATURE MONITORING
 void readTProbesTask(void* pvParameters);
 void heaterControlTask(void* pvParameters);
@@ -48,7 +48,7 @@ uint8_t devicesFound;
 DeviceAddress deviceAddresses[T_PROBE_COUNT] = {{0x28, 0x6B, 0xB2, 0x5A, 0x00, 0x00, 0x00, 0x2A},//BOILER     DONE
                                                 {0x28, 0x20, 0x1C, 0x5A, 0x00, 0x00, 0x00, 0x36},//TOP        DONE
                                                 {0x28, 0x13, 0x74, 0x58, 0x00, 0x00, 0x00, 0xAA},//FEED       DONE
-                                                {0x28, 0x1D, 0x8D, 0x5A, 0x00, 0x00, 0x00, 0xEB},//DISTILLATE 
+                                                {0x28, 0x1D, 0x8D, 0x5A, 0x00, 0x00, 0x00, 0xEB},//DISTILLATE DONE
                                                 {0x28, 0x61, 0x17, 0x59, 0x00, 0x00, 0x00, 0x8C}//AMBIENT     DONE
                                               };
 constexpr int WAIT_FOR_CONVERSION = pdMS_TO_TICKS(376);
