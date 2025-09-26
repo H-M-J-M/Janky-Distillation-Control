@@ -19,14 +19,16 @@
 
 enum TEMPERATURE_STATE {HOT, GOOD, COLD};
 #define T_PROBE_COUNT 5
-#define L_SENSOR_COUNT 6
+#define L_SENSOR_COUNT 5
 #define P_SENSOR_COUNT 3
 #define P_SENSOR_COMBS 6
 //PIN ASSIGNMENTS
 constexpr uint8_t HeatRelayPin = 5;
 constexpr int oneWireBus = 4; // bus for the temperature sensors
 // Use ADC2 pins for liquid level sensing
-constexpr uint8_t L_SENSE_PINS[L_SENSOR_COUNT] = {11, 12, 13, 14, 15, 16}; // ADC2_0 to ADC2_5
+constexpr uint8_t L_SENSE_PINS[L_SENSOR_COUNT] = {11, 12, 13, 14, 15};
+constexpr uint8_t L_SENSE_GND_PROBE_PIN = 16; // TODO: Lowest probe is now a ground pin
+constexpr uint8_t L_SENSE_GND_CHASSIS_PIN = 17; // TODO: Chassis is now connected to a GPIO
 constexpr uint8_t L_SENSE_PWR_PIN = 38;
 //I2C pins for pressure sensors
 constexpr uint8_t I2C_SDA = 8;
@@ -50,10 +52,10 @@ static TEMPERATURE_STATE T_STATE;
 static float T_READINGS[T_PROBE_COUNT] = {1.f, 2.f, 3.f, 4.f, 5.f};
 
 //RELAY HEATER CONTROL
-constexpr float LOW_TEMP = 95.f;
-constexpr float HIGH_TEMP = 102.f;
+constexpr float LOW_TEMP = 60.f;
+constexpr float HIGH_TEMP = 100.f;
 constexpr int HEAT_CYCLE_TIME = pdMS_TO_TICKS(5000); //Total length of a heating cycle (ms)
-constexpr float BOILER_TARGET_T = 99.f;
+constexpr float BOILER_TARGET_T = 98.f;
 
 //LIQUID LEVEL MONITORING
 #define DELAYBETWEENREADS_US 100 // microseconds
@@ -67,7 +69,7 @@ enum LIQUID_STATE {
   STATE_UNCERTAIN
 };
 
-static uint8_t L_SENSOR_STATES = 0b0011'1111; // 1 = above waterline, 0 = submerged
+static uint8_t L_SENSOR_STATES = 0b0001'1111; // 1 = above waterline, 0 = submerged
 
 void scanLSensors(const uint8_t* sensorPins, uint8_t& sensorState, const uint8_t powerPin, uint8_t count);
 void scanLSensorsTask(void* pvParameters);
@@ -164,12 +166,14 @@ void setup() {
   digitalWrite(HeatRelayPin, LOW);
 
    // Initialize liquid sensing pins.
-  for (const uint8_t& pin : L_SENSE_PINS) {
+    for (const uint8_t& pin : L_SENSE_PINS) {
     // Set attenuation for all ADC pins to allow for the full 0-3.3V range
     analogSetPinAttenuation(pin, ADC_11db);
   }
   pinMode(L_SENSE_PWR_PIN, OUTPUT);
   digitalWrite(L_SENSE_PWR_PIN, LOW); // Depower sensor wires
+  pinMode(L_SENSE_GND_CHASSIS_PIN, INPUT);
+  pinMode(L_SENSE_GND_PROBE_PIN, INPUT);
   Serial.println("DBG: Level sensors initialized.");
 
   //Setup pressure sensors:
@@ -218,7 +222,7 @@ void readTProbes(const DeviceAddress (&Taddrs)[T_PROBE_COUNT], float (&TVals)[T_
 void maintainTemperature(uint8_t HeaterPin, const float currentTemp){
   float error = BOILER_TARGET_T - currentTemp;
   float output;
-  error > 0 ? output = error * 0.19 - 0.05 : output = 0.05; //TODO greatly reduce lower setpoint to account for thermowell delayed response
+  error > 0 ? output = error * 0.025 + 0.05 : output = 0.05; 
   constexpr auto HALF_CYCLE_TIME = HEAT_CYCLE_TIME / 2;
   TickType_t onTime = output * HALF_CYCLE_TIME;
   TickType_t offTime = HALF_CYCLE_TIME - onTime;
@@ -251,78 +255,99 @@ LIQUID_STATE readLSensor(const uint8_t sensorPin) {
 }
 
 void scanLSensors(const uint8_t* sensorPins, uint8_t& sensorState, const uint8_t powerPin, uint8_t count) {
-  digitalWrite(powerPin, HIGH);
-  delayMicroseconds(DELAYBETWEENREADS_US); // Allow time for voltage to stabilize
+    LIQUID_STATE chassis_readings[L_SENSOR_COUNT];
+    LIQUID_STATE probe_readings[L_SENSOR_COUNT];
+    LIQUID_STATE final_consensus[L_SENSOR_COUNT];
 
-  LIQUID_STATE readings[SENSOR_POLL_COUNT][L_SENSOR_COUNT];
-  LIQUID_STATE consensus[L_SENSOR_COUNT];
+    //  Cycle 1: Chassis Ground Measurement 
+    pinMode(L_SENSE_GND_CHASSIS_PIN, OUTPUT);
+    digitalWrite(L_SENSE_GND_CHASSIS_PIN, LOW);
+    digitalWrite(powerPin, HIGH);
+    delayMicroseconds(DELAYBETWEENREADS_US);
 
-  // 1. Poll sensors multiple times
-  for (int poll = 0; poll < SENSOR_POLL_COUNT; ++poll) {
-    for (int i = 0; i < count; ++i) {
-      readings[poll][i] = readLSensor(sensorPins[i]);
-    }
-    vTaskDelay(pdMS_TO_TICKS(10)); // Small delay between polls
-  }
-
-  digitalWrite(powerPin, LOW); // Depower sensors as soon as readings are done
-
-  // 2. Determine consensus for each sensor
-  int uncertain_count = 0;
-  for (int i = 0; i < count; ++i) {
-    int dry_votes = 0;
-    int wet_votes = 0;
+    LIQUID_STATE readings_cycle1[SENSOR_POLL_COUNT][L_SENSOR_COUNT];
     for (int poll = 0; poll < SENSOR_POLL_COUNT; ++poll) {
-      if (readings[poll][i] == STATE_DRY) dry_votes++;
-      if (readings[poll][i] == STATE_WET) wet_votes++;
+        for (int i = 0; i < count; ++i) {
+            readings_cycle1[poll][i] = readLSensor(sensorPins[i]);
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 
-    if (wet_votes > SENSOR_POLL_COUNT / 2) {
-      consensus[i] = STATE_WET;
-    } else if (dry_votes > SENSOR_POLL_COUNT / 2) {
-      consensus[i] = STATE_DRY;
-    } else {
-      consensus[i] = STATE_UNCERTAIN;
-      uncertain_count++;
+    for (int i = 0; i < count; ++i) {
+        int dry_votes = 0, wet_votes = 0;
+        for (int poll = 0; poll < SENSOR_POLL_COUNT; ++poll) {
+            if (readings_cycle1[poll][i] == STATE_DRY) dry_votes++;
+            if (readings_cycle1[poll][i] == STATE_WET) wet_votes++;
+        }
+        if (wet_votes > SENSOR_POLL_COUNT / 2) chassis_readings[i] = STATE_WET;
+        else if (dry_votes > SENSOR_POLL_COUNT / 2) chassis_readings[i] = STATE_DRY;
+        else chassis_readings[i] = STATE_UNCERTAIN;
     }
-  }
 
- 
-  // Check for a total failure to reach consensus.
-  if (uncertain_count == count) {
-      Serial.println("DBG: L-SENSE: All sensors returned indeterminate readings. Level cannot be determined.");
-  }
+    digitalWrite(powerPin, LOW);
+    pinMode(L_SENSE_GND_CHASSIS_PIN, INPUT); // Return to high-Z
 
+    //  Cycle 2: Bottom Probe Ground Measurement 
+    pinMode(L_SENSE_GND_PROBE_PIN, OUTPUT);
+    digitalWrite(L_SENSE_GND_PROBE_PIN, LOW);
+    digitalWrite(powerPin, HIGH);
+    delayMicroseconds(DELAYBETWEENREADS_US);
 
-  // 3. Apply plausibility logic to determine true water level
-  int true_level_index = -1; // -1 means boiler is empty
-  // Find the highest sensor that is definitively WET
-  for (int i = count - 1; i >= 0; --i) {
-    if (consensus[i] == STATE_WET) {
-      true_level_index = i;
-      break;
+    LIQUID_STATE readings_cycle2[SENSOR_POLL_COUNT][L_SENSOR_COUNT];
+    for (int poll = 0; poll < SENSOR_POLL_COUNT; ++poll) {
+        for (int i = 0; i < count; ++i) {
+            readings_cycle2[poll][i] = readLSensor(sensorPins[i]);
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
-  }
 
-  // 4. Build the final state bitmask based on the true level
-  uint8_t new_sensor_states = 0;
-  for (int i = 0; i < count; ++i) {
-    if (i > true_level_index) {
-      new_sensor_states |= (1 << i);
+    for (int i = 0; i < count; ++i) {
+        int dry_votes = 0, wet_votes = 0;
+        for (int poll = 0; poll < SENSOR_POLL_COUNT; ++poll) {
+            if (readings_cycle2[poll][i] == STATE_DRY) dry_votes++;
+            if (readings_cycle2[poll][i] == STATE_WET) wet_votes++;
+        }
+        if (wet_votes > SENSOR_POLL_COUNT / 2) probe_readings[i] = STATE_WET;
+        else if (dry_votes > SENSOR_POLL_COUNT / 2) probe_readings[i] = STATE_DRY;
+        else probe_readings[i] = STATE_UNCERTAIN;
     }
-  }
-  
-  // Report state change only if the state has actually changed to avoid spamming the log.
-  if (new_sensor_states != sensorState) {
-      char buf[64];
-      // Use C-style string formatting to avoid dynamic memory allocation of String class in a task
-      snprintf(buf, sizeof(buf), "DBG: L-SENSE: State changed from 0b%06u to 0b%06u", sensorState, new_sensor_states);
-      Serial.println(buf);
-  }
 
-  sensorState = new_sensor_states;
+    digitalWrite(powerPin, LOW);
+    pinMode(L_SENSE_GND_PROBE_PIN, INPUT); // Return to high-Z
+
+    //  Plausibility and Final State Logic 
+    for (int i = 0; i < count; ++i) {
+        if (chassis_readings[i] == STATE_WET && probe_readings[i] == STATE_WET) {
+            final_consensus[i] = STATE_WET;
+        } else {
+            // Any other combination (dry/wet, uncertain, etc.) is not a confirmed submersion
+            final_consensus[i] = STATE_DRY; 
+        }
+    }
+
+    int true_level_index = -1; // -1 means boiler is empty
+    for (int i = count - 1; i >= 0; --i) {
+        if (final_consensus[i] == STATE_WET) {
+            true_level_index = i;
+            break;
+        }
+    }
+
+    uint8_t new_sensor_states = 0;
+    for (int i = 0; i < count; ++i) {
+        if (i > true_level_index) {
+            new_sensor_states |= (1 << i);
+        }
+    }
+
+    if (new_sensor_states != sensorState) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "DBG: L-SENSE: State changed from 0b%05u to 0b%05u", sensorState, new_sensor_states);
+        Serial.println(buf);
+    }
+
+    sensorState = new_sensor_states;
 }
-
 
 void setPumpSpeed(uint8_t speedLevel) {
 // Constrain input to valid range
@@ -365,32 +390,28 @@ void boilerLevelTask(void* pvParameters){
     // It should be OFF at low levels and turn ON at high levels.
     switch (L_SENSOR_STATES)
     {
-    case 0b0011'1111:
-    case 0b0001'1111:
-    case 0b0000'1111:
+    case 0b0001'1111: // 0 wet
+    case 0b0000'1111: // 1 wet
+    case 0b0000'0111: // 2 wet
       setPumpSpeed(0);
       break;
-    case 0b0000'0111:   // 3 sensors dry (level is rising)
+    case 0b0000'0011: // 3 wet
       setPumpSpeed(1);
       break;
-    case 0b0000'0011:   // 2 sensors dry
-      setPumpSpeed(2);
-      break;
-    case 0b0000'0001:   // 1 sensor dry
+    case 0b0000'0001: // 4 wet
       setPumpSpeed(3);
       break;
-    case 0b0000'0000:     // All sensors submerged (level is very high)
-      setPumpSpeed(6); // Turn pump to MAX to empty boiler
+    case 0b0000'0000: // 5 wet
+      setPumpSpeed(6); // Turn pump to MAX to drain boiler
       break;
-    // Default to OFF for safety
-      //Serial.println("DBG: UNKNOWN LIQUID LEVEL, PUMP OFF!");
+    default: // Default to OFF for safety
+      setPumpSpeed(0);
       break;
     }
     //Serial.printf("DBG: BLTFree %u byt\n", uxTaskGetStackHighWaterMark(NULL));
     vTaskDelay(BOILER_PUMP_INTERVAL_MS);
   }
-}
-// TEMPERATURE MONITOR
+}// TEMPERATURE MONITOR
 void readTProbesTask(void* pvParameters){
   for (;;)
   {
