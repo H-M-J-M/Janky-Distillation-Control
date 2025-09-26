@@ -73,14 +73,6 @@ is created between ground and the INPUT pin, because OUTPUT LOW is not the same 
 */
 
 #define DELAYBETWEENREADS 60 //microseconds
-//liquid level bitmasks
-#define BELOW 0b0000'0000
-#define LEVEL_1 0b0000'0001
-#define LEVEL_2 0b0000'0011
-#define LEVEL_3 0b0000'0111
-#define LEVEL_4 0b0000'1111
-#define LEVEL_5 0b0001'1111
-#define ABOVE 0b0011'1111
 
 static constexpr uint8_t L_SensorBitmasks[L_SENSOR_COUNT] = {
   1 << 0, // Bottom sensor (0b0000'0001)
@@ -240,7 +232,7 @@ void readTProbes(const DeviceAddress (&Taddrs)[T_PROBE_COUNT], float (&TVals)[T_
 void maintainTemperature(uint8_t HeaterPin, const float currentTemp){
   float error = BOILER_TARGET_T - currentTemp;
   float output;
-  error > 0 ? output = error * 0.19 - 0.05 : output = 0.05;
+  error > 0 ? output = error * 0.19 - 0.05 : output = 0.05; //TODO greatly reduce lower setpoint to account for thermowell delayed response
   constexpr auto HALF_CYCLE_TIME = HEAT_CYCLE_TIME / 2;
   TickType_t onTime = output * HALF_CYCLE_TIME;
   TickType_t offTime = HALF_CYCLE_TIME - onTime;
@@ -313,28 +305,29 @@ void scanLSensorsTask(void* pvParameters){
 void boilerLevelTask(void* pvParameters){
   for (;;)
   {
+    // The pump empties the boiler.
+    // It should be OFF at low levels and turn ON at high levels.
     switch (L_SENSOR_STATES)
     {
-    case BELOW:
-    case LEVEL_1:
-    case LEVEL_2:
+    case 0b0011'1111:
+    case 0b0001'1111:
+    case 0b0000'1111:
       setPumpSpeed(0);
       break;
-    case LEVEL_3:
+    case 0b0000'0111:   // 3 sensors dry (level is rising)
       setPumpSpeed(1);
       break;
-    case LEVEL_4:
+    case 0b0000'0011:   // 2 sensors dry
       setPumpSpeed(2);
       break;
-    case LEVEL_5:
+    case 0b0000'0001:   // 1 sensor dry
       setPumpSpeed(3);
       break;
-    case ABOVE:
-      setPumpSpeed(6);
+    case 0b0000'0000:     // All sensors submerged (level is very high)
+      setPumpSpeed(6); // Turn pump to MAX to empty boiler
       break;
-    default:
-      setPumpSpeed(0);
-      Serial.println("DBG: UNKOWN LIQUID LEVEL!");
+    // Default to OFF for safety
+      //Serial.println("DBG: UNKNOWN LIQUID LEVEL, PUMP OFF!");
       break;
     }
     //Serial.printf("DBG: BLTFree %u byt\n", uxTaskGetStackHighWaterMark(NULL));
