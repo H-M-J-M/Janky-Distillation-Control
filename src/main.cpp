@@ -26,12 +26,12 @@ enum TEMPERATURE_STATE {HOT, GOOD, COLD};
 constexpr uint8_t HeatRelayPin = 5;
 constexpr int oneWireBus = 4; // bus for the temperature sensors
 constexpr uint8_t L_SENSE_PINS[L_SENSOR_COUNT] = { //pin 1 (index 0) is lower sensor
-  1, // GPIO1 + TOUCH1 (Alternate functions are RTC, ADC1_0)
-  2, // GPIO2 + TOUCH2 (Alternate functions are RTC, ADC1_1)
-  42,// GPIO42 + MTMS
-  41,// GPIO41 + MTDI
-  40,// GPIO40 + MTDO
-  39// GPIO39 + MTCK
+  11, //ADC2_0
+  12, //ADC2_1
+  13, //ADC2_2
+  14, //ADC2_3
+  15, //ADC2_4
+  16  //ADC2_5
   };
 constexpr uint8_t L_SENSE_PWR_PIN = 38;
 //I2C pins for pressure sensors
@@ -62,15 +62,6 @@ constexpr int HEAT_CYCLE_TIME = pdMS_TO_TICKS(5000); //Total length of a heating
 constexpr float BOILER_TARGET_T = 99.f;
 
 //LIQUID LEVEL MONITORING
-/*
-Idea I didn't implement: You could improve error handling caused by bridged sensor wires if in addition to checking path to ground through the liquid
-you also checked for current flow from a sensor to it's adjacent sensors. To do this you would need to switch from using ground
-as the return path and instead use an OUTPUT LOW pin. This way the 'main' ground on the column exterior could be disconnected while
-the tests between pins are done. You would check a pair of adjacent wires by setting the lower wire to OUTPUT LOW and the higher wire
-would be checked in the current way (power pin OUTPUT HIGH, sensor pin INPUT). Logic and delays would be needed for settling time. 
-Some thought also needs to be put into whether this would actually behave equivalently to the current setup where a voltage divider 
-is created between ground and the INPUT pin, because OUTPUT LOW is not the same as ground.
-*/
 
 #define DELAYBETWEENREADS 60 //microseconds
 
@@ -388,7 +379,7 @@ void readPressureSensorsTask(void* pvParameters){
     PADC.setGain(PADC_DIFF_GAIN);
     P_READINGS[3] = readPressureChannel(ADS1X15_REG_CONFIG_MUX_DIFF_0_3);//Relative bottom pressure
     P_READINGS[4] = readPressureChannel(ADS1X15_REG_CONFIG_MUX_DIFF_1_3);//Relative top pressure
-    PADC.setGain(GAIN_TWO);
+    PADC.setGain(PADC_ABS_GAIN);
     P_READINGS[5] = readPressureChannel(ADS1X15_REG_CONFIG_MUX_DIFF_0_1);//Pressure gradient in column
     
     //Serial.printf("DBG: RPSTFree %u byt\n", uxTaskGetStackHighWaterMark(NULL));
