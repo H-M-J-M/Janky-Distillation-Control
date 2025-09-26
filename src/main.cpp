@@ -25,14 +25,8 @@ enum TEMPERATURE_STATE {HOT, GOOD, COLD};
 //PIN ASSIGNMENTS
 constexpr uint8_t HeatRelayPin = 5;
 constexpr int oneWireBus = 4; // bus for the temperature sensors
-constexpr uint8_t L_SENSE_PINS[L_SENSOR_COUNT] = { //pin 1 (index 0) is lower sensor
-  11, //ADC2_0
-  12, //ADC2_1
-  13, //ADC2_2
-  14, //ADC2_3
-  15, //ADC2_4
-  16  //ADC2_5
-  };
+// Use ADC2 pins for liquid level sensing
+constexpr uint8_t L_SENSE_PINS[L_SENSOR_COUNT] = {11, 12, 13, 14, 15, 16}; // ADC2_0 to ADC2_5
 constexpr uint8_t L_SENSE_PWR_PIN = 38;
 //I2C pins for pressure sensors
 constexpr uint8_t I2C_SDA = 8;
@@ -62,22 +56,23 @@ constexpr int HEAT_CYCLE_TIME = pdMS_TO_TICKS(5000); //Total length of a heating
 constexpr float BOILER_TARGET_T = 99.f;
 
 //LIQUID LEVEL MONITORING
+#define DELAYBETWEENREADS_US 100 // microseconds
+#define ADC_DRY_THRESHOLD_MV 2900 // A reading > 2.9V is considered dry
+#define ADC_WET_THRESHOLD_MV 700  // A reading < 0.7V is considered wet
+#define SENSOR_POLL_COUNT 3
 
-#define DELAYBETWEENREADS 60 //microseconds
+enum LIQUID_STATE {
+  STATE_DRY,
+  STATE_WET,
+  STATE_UNCERTAIN
+};
 
-static constexpr uint8_t L_SensorBitmasks[L_SENSOR_COUNT] = {
-  1 << 0, // Bottom sensor (0b0000'0001)
-  1 << 1,
-  1 << 2,
-  1 << 3,
-  1 << 4,
-  1 << 5};
 static uint8_t L_SENSOR_STATES = 0b0011'1111; // 1 = above waterline, 0 = submerged
 
-void readLSensor(const uint8_t sensorPin, uint8_t& sensorState, const uint8_t sensorBitmask);
-void scanLSensors(const uint8_t* sensorPins, uint8_t& sensorState, const uint8_t* sensorBitmasks, const uint8_t powerPin, uint8_t count);
+void scanLSensors(const uint8_t* sensorPins, uint8_t& sensorState, const uint8_t powerPin, uint8_t count);
 void scanLSensorsTask(void* pvParameters);
 void boilerLevelTask(void* pvParameters);
+
 //temperature monitoring
 ////////////
 
@@ -168,13 +163,13 @@ void setup() {
   pinMode(HeatRelayPin, OUTPUT);
   digitalWrite(HeatRelayPin, LOW);
 
-   // Initialize liquid sensing pins to high-Z
+   // Initialize liquid sensing pins.
   for (const uint8_t& pin : L_SENSE_PINS) {
-    pinMode(pin, INPUT);
+    // Set attenuation for all ADC pins to allow for the full 0-3.3V range
+    analogSetPinAttenuation(pin, ADC_11db);
   }
   pinMode(L_SENSE_PWR_PIN, OUTPUT);
   digitalWrite(L_SENSE_PWR_PIN, LOW); // Depower sensor wires
-  delayMicroseconds(100);
   Serial.println("DBG: Level sensors initialized.");
 
   //Setup pressure sensors:
@@ -243,21 +238,94 @@ void maintainTemperature(uint8_t HeaterPin, const float currentTemp){
   vTaskDelay(offTime);
 }
 
-void readLSensor(const uint8_t sensorPin, uint8_t& sensorStates, const uint8_t sensorBitmask) {
-  sensorStates = (sensorStates & ~sensorBitmask) | (digitalRead(sensorPin) * sensorBitmask); //select relevent bit and update with sensor reading
-  return;
-}
-
-void scanLSensors(const uint8_t* sensorPins, uint8_t& sensorState, const uint8_t* sensorBitmasks, const uint8_t powerPin, uint8_t count) {
-  digitalWrite(powerPin, HIGH);
-  delayMicroseconds(DELAYBETWEENREADS);
-
-  for (uint8_t i = 0; i < count; ++i) {
-    readLSensor(sensorPins[i], sensorState, sensorBitmasks[i]);
-    delayMicroseconds(DELAYBETWEENREADS);
+LIQUID_STATE readLSensor(const uint8_t sensorPin) {
+  int millivolts = analogReadMilliVolts(sensorPin);
+  
+  if (millivolts > ADC_DRY_THRESHOLD_MV) {
+    return STATE_DRY;
+  } else if (millivolts < ADC_WET_THRESHOLD_MV) {
+    return STATE_WET;
+  } else {
+    return STATE_UNCERTAIN;
   }
-  digitalWrite(powerPin, LOW);
 }
+
+void scanLSensors(const uint8_t* sensorPins, uint8_t& sensorState, const uint8_t powerPin, uint8_t count) {
+  digitalWrite(powerPin, HIGH);
+  delayMicroseconds(DELAYBETWEENREADS_US); // Allow time for voltage to stabilize
+
+  LIQUID_STATE readings[SENSOR_POLL_COUNT][L_SENSOR_COUNT];
+  LIQUID_STATE consensus[L_SENSOR_COUNT];
+
+  // 1. Poll sensors multiple times
+  for (int poll = 0; poll < SENSOR_POLL_COUNT; ++poll) {
+    for (int i = 0; i < count; ++i) {
+      readings[poll][i] = readLSensor(sensorPins[i]);
+    }
+    vTaskDelay(pdMS_TO_TICKS(10)); // Small delay between polls
+  }
+
+  digitalWrite(powerPin, LOW); // Depower sensors as soon as readings are done
+
+  // 2. Determine consensus for each sensor
+  int uncertain_count = 0;
+  for (int i = 0; i < count; ++i) {
+    int dry_votes = 0;
+    int wet_votes = 0;
+    for (int poll = 0; poll < SENSOR_POLL_COUNT; ++poll) {
+      if (readings[poll][i] == STATE_DRY) dry_votes++;
+      if (readings[poll][i] == STATE_WET) wet_votes++;
+    }
+
+    if (wet_votes > SENSOR_POLL_COUNT / 2) {
+      consensus[i] = STATE_WET;
+    } else if (dry_votes > SENSOR_POLL_COUNT / 2) {
+      consensus[i] = STATE_DRY;
+    } else {
+      consensus[i] = STATE_UNCERTAIN;
+      uncertain_count++;
+    }
+  }
+
+  // --- START: ADDED DEBUG LOGIC ---
+  // Check for a total failure to reach consensus. This is a critical, infrequent event.
+  if (uncertain_count == count) {
+      Serial.println("DBG: L-SENSE: All sensors returned indeterminate readings. Level cannot be determined.");
+  }
+  // --- END: ADDED DEBUG LOGIC ---
+
+
+  // 3. Apply plausibility logic to determine true water level
+  int true_level_index = -1; // -1 means boiler is empty
+  // Find the highest sensor that is definitively WET
+  for (int i = count - 1; i >= 0; --i) {
+    if (consensus[i] == STATE_WET) {
+      true_level_index = i;
+      break;
+    }
+  }
+
+  // 4. Build the final state bitmask based on the true level
+  uint8_t new_sensor_states = 0;
+  for (int i = 0; i < count; ++i) {
+    if (i > true_level_index) {
+      new_sensor_states |= (1 << i);
+    }
+  }
+  
+  // --- START: ADDED DEBUG LOGIC ---
+  // Report state change only if the state has actually changed to avoid spamming the log.
+  if (new_sensor_states != sensorState) {
+      char buf[64];
+      // Use C-style string formatting to avoid dynamic memory allocation of String class in a task
+      snprintf(buf, sizeof(buf), "DBG: L-SENSE: State changed from 0b%06u to 0b%06u", sensorState, new_sensor_states);
+      Serial.println(buf);
+  }
+  // --- END: ADDED DEBUG LOGIC ---
+
+  sensorState = new_sensor_states;
+}
+
 
 void setPumpSpeed(uint8_t speedLevel) {
 // Constrain input to valid range
@@ -286,7 +354,7 @@ void setupPump() {
 void scanLSensorsTask(void* pvParameters){
   for (;;)
   {
-    scanLSensors(L_SENSE_PINS, L_SENSOR_STATES, L_SensorBitmasks, L_SENSE_PWR_PIN, L_SENSOR_COUNT);
+    scanLSensors(L_SENSE_PINS, L_SENSOR_STATES, L_SENSE_PWR_PIN, L_SENSOR_COUNT);
     //Serial.printf("DBG: LSTFree %u byt\n", uxTaskGetStackHighWaterMark(NULL));
 
     vTaskDelay(LIQUID_SENSE_INTERVAL_MS);
