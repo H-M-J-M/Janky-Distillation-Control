@@ -287,12 +287,11 @@ void scanLSensors(const uint8_t* sensorPins, uint8_t& sensorState, const uint8_t
     }
   }
 
-  // --- START: ADDED DEBUG LOGIC ---
-  // Check for a total failure to reach consensus. This is a critical, infrequent event.
+ 
+  // Check for a total failure to reach consensus.
   if (uncertain_count == count) {
       Serial.println("DBG: L-SENSE: All sensors returned indeterminate readings. Level cannot be determined.");
   }
-  // --- END: ADDED DEBUG LOGIC ---
 
 
   // 3. Apply plausibility logic to determine true water level
@@ -313,7 +312,6 @@ void scanLSensors(const uint8_t* sensorPins, uint8_t& sensorState, const uint8_t
     }
   }
   
-  // --- START: ADDED DEBUG LOGIC ---
   // Report state change only if the state has actually changed to avoid spamming the log.
   if (new_sensor_states != sensorState) {
       char buf[64];
@@ -321,7 +319,6 @@ void scanLSensors(const uint8_t* sensorPins, uint8_t& sensorState, const uint8_t
       snprintf(buf, sizeof(buf), "DBG: L-SENSE: State changed from 0b%06u to 0b%06u", sensorState, new_sensor_states);
       Serial.println(buf);
   }
-  // --- END: ADDED DEBUG LOGIC ---
 
   sensorState = new_sensor_states;
 }
