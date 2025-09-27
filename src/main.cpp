@@ -194,7 +194,7 @@ void setup() {
   Serial.println("DBG: Pump initialized.");
 
   //Start Tasks
-  xTaskCreate(scanLSensorsTask, "scanLSensorsT", 6144, NULL, 8, &scanLSensorsTaskHandle);
+  xTaskCreate(scanLSensorsTask, "scanLSensorsT", 8192, NULL, 8, &scanLSensorsTaskHandle);
   xTaskCreate(boilerLevelTask, "boilerLevelT", 6144, NULL, 7, &boilerLevelTaskHandle);
   xTaskCreate(readTProbesTask, "readTProbesT", 8192, NULL, 6, &readTProbesTaskHandle);
   xTaskCreate(heaterControlTask, "heaterControlT", 6144, NULL, 5, &heaterControlTaskHandle);
