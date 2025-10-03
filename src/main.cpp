@@ -55,11 +55,11 @@ static float T_READINGS[T_PROBE_COUNT] = {1.f, 2.f, 3.f, 4.f, 5.f};
 //RELAY HEATER CONTROL
 enum TEMPERATURE_STATE : uint8_t {HOT, GOOD, COLD};
 static TEMPERATURE_STATE T_STATE;
-constexpr float BOILER_TARGET_T = 99.f;
-constexpr float LOW_TEMP = 90.f;
-constexpr float HIGH_TEMP = 100.f;
+constexpr float BOILER_TARGET_T = 100.f;
+constexpr float LOW_TEMP = 94.f;
+constexpr float HIGH_TEMP = 100.5f;
 constexpr int HEAT_CYCLE_TIME = pdMS_TO_TICKS(5000); //Total length of a heating cycle (ms)
-#define HEATER_MIN_DUTY_CYCLE 0.05f // these are used to set offsets for the proportional controller (i.e. the minimum duty cycle when the boiler is already hot)
+#define HEATER_MIN_DUTY_CYCLE 0.07f // these are used to set offsets for the proportional controller (i.e. the minimum duty cycle when the boiler is already hot)
 #define HEATER_MAX_DUTY_CYCLE 1.0f // (the maximum duty cycle when the boiler is cold)
 #define HEATER_P_GAIN ((HEATER_MAX_DUTY_CYCLE - HEATER_MIN_DUTY_CYCLE) / (BOILER_TARGET_T - LOW_TEMP))
 
