@@ -1,32 +1,34 @@
 #include <Arduino.h>
 #include <esp_timer.h>
+#include "driver/ledc.h"
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <Wire.h>
 #include <Adafruit_ADS1X15.h>
-#include <ArduinoJson.h>
 
 //TASK INTERVALS
-#define LIQUID_SENSE_INTERVAL_MS pdMS_TO_TICKS(500)
+#define LIQUID_SENSE_INTERVAL_MS pdMS_TO_TICKS(2000)
 #define BOILER_PUMP_INTERVAL_MS pdMS_TO_TICKS(500)
-#define TEMP_SENSE_INTERVAL_MS pdMS_TO_TICKS(2000)
+#define TEMP_SENSE_INTERVAL_MS pdMS_TO_TICKS(3500)
 #define PRESS_SENSE_INTERVAL_MS pdMS_TO_TICKS(2000)
 #define PRESS_SENSE_TIME_MS pdMS_TO_TICKS(140)
 #define LOG_INTERVAL pdMS_TO_TICKS(2000)
 
 #define PADC_ABS_GAIN GAIN_TWO
 #define PADC_DIFF_GAIN GAIN_FOUR
+#define PZERO_OFFSET 157
+#define PONE_OFFSET 213
+#define PTHREE_OFFSET 248
 
-enum TEMPERATURE_STATE {HOT, GOOD, COLD};
 #define T_PROBE_COUNT 5
-#define L_SENSOR_COUNT 5
+#define L_SENSOR_COUNT 4
 #define P_SENSOR_COUNT 3
 #define P_SENSOR_COMBS 6
 //PIN ASSIGNMENTS
 constexpr uint8_t HeatRelayPin = 5;
 constexpr int oneWireBus = 4; // bus for the temperature sensors
 // Use ADC2 pins for liquid level sensing
-constexpr uint8_t L_SENSE_PINS[L_SENSOR_COUNT] = {11, 12, 13, 14, 15};
+constexpr uint8_t L_SENSE_PINS[L_SENSOR_COUNT] = {12, 13, 14, 15};
 constexpr uint8_t L_SENSE_GND_PROBE_PIN = 16; // TODO: Lowest probe is now a ground pin
 constexpr uint8_t L_SENSE_GND_CHASSIS_PIN = 17; // TODO: Chassis is now connected to a GPIO
 constexpr uint8_t L_SENSE_PWR_PIN = 38;
@@ -48,20 +50,24 @@ DeviceAddress deviceAddresses[T_PROBE_COUNT] = {{0x28, 0x6B, 0xB2, 0x5A, 0x00, 0
                                                 {0x28, 0x61, 0x17, 0x59, 0x00, 0x00, 0x00, 0x8C}//AMBIENT     DONE
                                               };
 constexpr int WAIT_FOR_CONVERSION = pdMS_TO_TICKS(376);
-static TEMPERATURE_STATE T_STATE;
 static float T_READINGS[T_PROBE_COUNT] = {1.f, 2.f, 3.f, 4.f, 5.f};
 
 //RELAY HEATER CONTROL
-constexpr float LOW_TEMP = 60.f;
+enum TEMPERATURE_STATE : uint8_t {HOT, GOOD, COLD};
+static TEMPERATURE_STATE T_STATE;
+constexpr float BOILER_TARGET_T = 99.f;
+constexpr float LOW_TEMP = 90.f;
 constexpr float HIGH_TEMP = 100.f;
 constexpr int HEAT_CYCLE_TIME = pdMS_TO_TICKS(5000); //Total length of a heating cycle (ms)
-constexpr float BOILER_TARGET_T = 98.f;
+#define HEATER_MIN_DUTY_CYCLE 0.05f // these are used to set offsets for the proportional controller (i.e. the minimum duty cycle when the boiler is already hot)
+#define HEATER_MAX_DUTY_CYCLE 1.0f // (the maximum duty cycle when the boiler is cold)
+#define HEATER_P_GAIN ((HEATER_MAX_DUTY_CYCLE - HEATER_MIN_DUTY_CYCLE) / (BOILER_TARGET_T - LOW_TEMP))
 
 //LIQUID LEVEL MONITORING
 #define DELAYBETWEENREADS_US 100 // microseconds
-#define ADC_DRY_THRESHOLD_MV 2900 // A reading > 2.9V is considered dry
-#define ADC_WET_THRESHOLD_MV 700  // A reading < 0.7V is considered wet
-#define SENSOR_POLL_COUNT 3
+#define ADC_DRY_THRESHOLD_MV 2600 // A reading > 2.6V is considered dry
+#define ADC_WET_THRESHOLD_MV 1350  // A reading < 1.35V is considered wet
+#define SENSOR_POLL_COUNT 5
 
 enum LIQUID_STATE {
   STATE_DRY,
@@ -69,7 +75,7 @@ enum LIQUID_STATE {
   STATE_UNCERTAIN
 };
 
-static uint8_t L_SENSOR_STATES = 0b0001'1111; // 1 = above waterline, 0 = submerged
+static uint8_t L_SENSOR_STATES = 0b0000'1111; // 1 = above waterline, 0 = submerged
 
 void scanLSensors(const uint8_t* sensorPins, uint8_t& sensorState, const uint8_t powerPin, uint8_t count);
 void scanLSensorsTask(void* pvParameters);
@@ -87,13 +93,13 @@ void maintainTemperature(uint8_t HeaterPin, const float currentTemp);
 
 //Pressure Monitoring
 Adafruit_ADS1115 PADC;
-float readPressureChannel(const uint16_t  channel);
+int16_t readPressureChannel(const uint16_t  channel);
 void readPressureSensorsTask(void* pvParameters);
-static float P_READINGS[P_SENSOR_COMBS] = {0, 1, 3, 
+static int16_t P_READINGS[P_SENSOR_COMBS] = {0, 1, 3, 
                                 301, 403, 513};
 //Pump PWM Settings
-constexpr int PWM_CHANNEL = 0;// LEDC channels = 0-15
-constexpr int PWM_FREQ = 5000; // module freq range = 20kHz
+constexpr int PWM_CHANNEL = 0;
+constexpr int PWM_FREQ = 20000; 
 constexpr int PWM_RESOLUTION = 8; 
 //Speed Level to Duty Cycle Mapping
 // Calculated as: (TargetVoltage / 16.0V) * 255
@@ -111,16 +117,18 @@ static uint8_t pumpspeedLevel= 0;
 void setPumpSpeed(uint8_t speedLevel);
 void setupPump();
 
-void sendDataAsJSON(const TEMPERATURE_STATE& T_ST,
+void sendData(const uint8_t& T_ST,
                     const float (&T_READINGS)[T_PROBE_COUNT], 
                     const uint8_t &L_STATE, 
-                    const float (&P_R)[P_SENSOR_COMBS], 
+                    const int16_t (&P_R)[P_SENSOR_COMBS], 
                     const uint8_t &pumpSp);
 void reportDataTask(void* pvParameters);
 
 ////////////////
 //TASK HANDLES//
 ////////////////
+SemaphoreHandle_t serialMutex;
+
 TaskHandle_t scanLSensorsTaskHandle = NULL;
 TaskHandle_t boilerLevelTaskHandle = NULL;
 TaskHandle_t readTProbesTaskHandle = NULL;
@@ -130,23 +138,33 @@ TaskHandle_t reportDataTaskHandle = NULL;
 
 void setup() {  
   Serial.begin(115200);
+  Serial.setTxBufferSize(1024);
+  serialMutex = xSemaphoreCreateMutex();
+  if (serialMutex == NULL) {
+    Serial.println("D: error creating serial mutex!");
+  }
+   //Setup pump:
+  /////////////
+  setupPump();
+  Serial.println("D: pump initialized.");
+
   //Wait for serial communication.
   while (!Serial) {
     vTaskDelay(20 / portTICK_PERIOD_MS);
   }
   vTaskDelay(1000 / portTICK_PERIOD_MS);
-  Serial.println("DBG:Serial connection established.");
+  Serial.println("D: serial connection established.");
 
   //TEMPERATURE PROBES
   sensors.begin();
   devicesFound = sensors.getDeviceCount();
-  Serial.print("DBG: Number of devices found: ");
+  Serial.print("D: number of devices found: ");
   Serial.println(devicesFound);
 
   // Temperature probe verification
   for (uint8_t i = 0; i < T_PROBE_COUNT; i++) {
     if (!sensors.isConnected(deviceAddresses[i])) {
-      Serial.print("DBG: device at address ");
+      Serial.print("D: device at address ");
       for (uint8_t j = 0; j < 8; j++) {
         if (deviceAddresses[i][j] < 0x10) Serial.print("0");
         Serial.print(deviceAddresses[i][j], HEX);
@@ -157,7 +175,7 @@ void setup() {
   }
 
   if(devicesFound != T_PROBE_COUNT){
-    Serial.println("DBG: SOME TEMPERATURE PROBES ARE MISSING!");
+    Serial.println("D: some temperature probes are missing!");
   }
   sensors.setResolution(11); // 11 bit = 375ms delay for conversion
 
@@ -174,24 +192,19 @@ void setup() {
   digitalWrite(L_SENSE_PWR_PIN, LOW); // Depower sensor wires
   pinMode(L_SENSE_GND_CHASSIS_PIN, INPUT);
   pinMode(L_SENSE_GND_PROBE_PIN, INPUT);
-  Serial.println("DBG: Level sensors initialized.");
+  Serial.println("D: level sensors initialized.");
 
   //Setup pressure sensors:
   ////////////////////////
    Wire.begin(I2C_SDA, I2C_SCL);
-  Serial.println("DBG: I2C interface initialized.");
+  Serial.println("D: i2c interface initialized.");
 
   if (!PADC.begin()) {
-    Serial.println("DBG: Failed to find ADS1115 chip.");
+    Serial.println("D: failed to find ads1115 chip.");
     while (1); // Halt execution if sensor isn't found
   }
   PADC.setDataRate(RATE_ADS1115_8SPS); // 125 ms
-  Serial.println("DBG: Pressure ADC initialized.");
-
-  //Setup pump:
-  /////////////
-  setupPump();
-  Serial.println("DBG: Pump initialized.");
+  Serial.println("D: pressure adc initialized.");
 
   //Start Tasks
   xTaskCreate(scanLSensorsTask, "scanLSensorsT", 8192, NULL, 8, &scanLSensorsTaskHandle);
@@ -222,7 +235,7 @@ void readTProbes(const DeviceAddress (&Taddrs)[T_PROBE_COUNT], float (&TVals)[T_
 void maintainTemperature(uint8_t HeaterPin, const float currentTemp){
   float error = BOILER_TARGET_T - currentTemp;
   float output;
-  error > 0 ? output = error * 0.025 + 0.05 : output = 0.05; 
+  error > 0 ? output = error * HEATER_P_GAIN + HEATER_MIN_DUTY_CYCLE : output = HEATER_MIN_DUTY_CYCLE;
   constexpr auto HALF_CYCLE_TIME = HEAT_CYCLE_TIME / 2;
   TickType_t onTime = output * HALF_CYCLE_TIME;
   TickType_t offTime = HALF_CYCLE_TIME - onTime;
@@ -242,10 +255,15 @@ void maintainTemperature(uint8_t HeaterPin, const float currentTemp){
   vTaskDelay(offTime);
 }
 
-LIQUID_STATE readLSensor(const uint8_t sensorPin) {
+LIQUID_STATE readLSensor(const uint8_t sensorPin/*, bool printDebug = false*/) {
   int millivolts = analogReadMilliVolts(sensorPin);
-  
-  if (millivolts > ADC_DRY_THRESHOLD_MV) {
+/*if (printDebug) {
+Serial.print("DBG: LADC ");
+Serial.print(sensorPin);
+Serial.print(": ");
+Serial.println(millivolts);
+}*/
+  if (millivolts > ADC_DRY_THRESHOLD_MV) { // && millivolts < 4097) { possible safety check
     return STATE_DRY;
   } else if (millivolts < ADC_WET_THRESHOLD_MV) {
     return STATE_WET;
@@ -260,6 +278,7 @@ void scanLSensors(const uint8_t* sensorPins, uint8_t& sensorState, const uint8_t
     LIQUID_STATE final_consensus[L_SENSOR_COUNT];
 
     //  Cycle 1: Chassis Ground Measurement 
+    //Serial.println("DBG: Chassis Ground Measurement");
     pinMode(L_SENSE_GND_CHASSIS_PIN, OUTPUT);
     digitalWrite(L_SENSE_GND_CHASSIS_PIN, LOW);
     digitalWrite(powerPin, HIGH);
@@ -287,7 +306,9 @@ void scanLSensors(const uint8_t* sensorPins, uint8_t& sensorState, const uint8_t
     digitalWrite(powerPin, LOW);
     pinMode(L_SENSE_GND_CHASSIS_PIN, INPUT); // Return to high-Z
 
+    
     //  Cycle 2: Bottom Probe Ground Measurement 
+    //Serial.println("DBG: Bottom Probe Ground Measurement");
     pinMode(L_SENSE_GND_PROBE_PIN, OUTPUT);
     digitalWrite(L_SENSE_GND_PROBE_PIN, LOW);
     digitalWrite(powerPin, HIGH);
@@ -296,7 +317,7 @@ void scanLSensors(const uint8_t* sensorPins, uint8_t& sensorState, const uint8_t
     LIQUID_STATE readings_cycle2[SENSOR_POLL_COUNT][L_SENSOR_COUNT];
     for (int poll = 0; poll < SENSOR_POLL_COUNT; ++poll) {
         for (int i = 0; i < count; ++i) {
-            readings_cycle2[poll][i] = readLSensor(sensorPins[i]);
+            readings_cycle2[poll][i] = readLSensor(sensorPins[i]/*, true*/);
         }
         vTaskDelay(pdMS_TO_TICKS(10));
     }
@@ -311,6 +332,8 @@ void scanLSensors(const uint8_t* sensorPins, uint8_t& sensorState, const uint8_t
         else if (dry_votes > SENSOR_POLL_COUNT / 2) probe_readings[i] = STATE_DRY;
         else probe_readings[i] = STATE_UNCERTAIN;
     }
+
+    
 
     digitalWrite(powerPin, LOW);
     pinMode(L_SENSE_GND_PROBE_PIN, INPUT); // Return to high-Z
@@ -341,9 +364,13 @@ void scanLSensors(const uint8_t* sensorPins, uint8_t& sensorState, const uint8_t
     }
 
     if (new_sensor_states != sensorState) {
+      /*
+      if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
         char buf[64];
-        snprintf(buf, sizeof(buf), "DBG: L-SENSE: State changed from 0b%05u to 0b%05u", sensorState, new_sensor_states);
+        snprintf(buf, sizeof(buf), "D: l-sense: state changed from 0b%04u to 0b%04u", sensorState, new_sensor_states);
         Serial.println(buf);
+        xSemaphoreGive(serialMutex);
+      }*/
     }
 
     sensorState = new_sensor_states;
@@ -390,19 +417,18 @@ void boilerLevelTask(void* pvParameters){
     // It should be OFF at low levels and turn ON at high levels.
     switch (L_SENSOR_STATES)
     {
-    case 0b0001'1111: // 0 wet
-    case 0b0000'1111: // 1 wet
-    case 0b0000'0111: // 2 wet
+    case 0b0000'1111: // 0 wet
+    case 0b0000'1110: // 1 wet
       setPumpSpeed(0);
       break;
-    case 0b0000'0011: // 3 wet
+    case 0b0000'1100: // 2 wet
+      setPumpSpeed(0);
+      break;
+    case 0b0000'1000: // 3 wet
       setPumpSpeed(1);
       break;
-    case 0b0000'0001: // 4 wet
-      setPumpSpeed(3);
-      break;
-    case 0b0000'0000: // 5 wet
-      setPumpSpeed(6); // Turn pump to MAX to drain boiler
+    case 0b0000'0000: // 4 wet
+      setPumpSpeed(3); 
       break;
     default: // Default to OFF for safety
       setPumpSpeed(0);
@@ -445,11 +471,28 @@ void heaterControlTask(void* pvParameters){
 }
 
 // PRESSURE MONITOR
-float readPressureChannel(const uint16_t channel){
+int16_t readPressureChannel(const uint16_t channel){
   PADC.startADCReading(channel, false);
   vTaskDelay(PRESS_SENSE_TIME_MS);
   int16_t adc_raw = PADC.getLastConversionResults();
-  return PADC.computeVolts(adc_raw);
+  switch (channel)
+  {
+  case MUX_BY_CHANNEL[0]:
+    return ( adc_raw - PZERO_OFFSET );
+    break;
+
+  case MUX_BY_CHANNEL[1]:
+    return ( adc_raw - PONE_OFFSET );
+    break;
+  
+  case MUX_BY_CHANNEL[3]:
+    return ( adc_raw - PTHREE_OFFSET );
+    break;
+
+  default:
+    break;
+  }
+  return adc_raw;
 }
 
 
@@ -474,38 +517,47 @@ void readPressureSensorsTask(void* pvParameters){
 }
 
 //MONITORING
-void sendDataAsJSON(const TEMPERATURE_STATE& T_ST, 
+void sendData(const uint8_t& T_ST,
                     const float (&T_READINGS)[T_PROBE_COUNT], 
                     const uint8_t &L_STATE, 
-                    const float (&P_R)[P_SENSOR_COMBS], 
-                    const uint8_t &pumpSp){
-  JsonDocument doc;
-  doc["t"] = esp_timer_get_time();
+                    const int16_t (&P_R)[P_SENSOR_COMBS], 
+                    const uint8_t &pumpSp)
+{
+    if (xSemaphoreTake(serialMutex, pdMS_TO_TICKS(10)) == pdTRUE) 
+    {
+      char buffer[128]; //used generic char and int types because that is how the version of snprintf is defined (in stdio.h in the toolchain (xtensa uses C stdio.h	5.3 (Berkeley) 3/15/86))
+      int offset = 0;
 
-    JsonObject Temp_0 = doc["Temp"].to<JsonObject>();
-  Temp_0["T_state"] = T_ST;
+      offset += snprintf(buffer + offset, sizeof(buffer) - offset, "X:%llu,", esp_timer_get_time());
+      offset += snprintf(buffer + offset, sizeof(buffer) - offset, "S:%u,", T_ST);
 
-  JsonArray Temp_0_T_readings = Temp_0["T_readings"].to<JsonArray>();
-  for (int i = 0; i < T_PROBE_COUNT; ++i) {
-    Temp_0_T_readings.add(T_READINGS[i]);
-  }
+      offset += snprintf(buffer + offset, sizeof(buffer) - offset, "T:[");
+      for (int i = 0; i < T_PROBE_COUNT; ++i) {
+          offset += snprintf(buffer + offset, sizeof(buffer) - offset, "%.3f%s", T_READINGS[i], (i < T_PROBE_COUNT - 1) ? "," : "");
+      }
+      offset += snprintf(buffer + offset, sizeof(buffer) - offset, "],");
 
-  doc["L_state"] = L_STATE;
+      offset += snprintf(buffer + offset, sizeof(buffer) - offset, "L:%X,", L_STATE);
 
-  JsonArray P_readings = doc["P_readings"].to<JsonArray>();
-  for (int i = 0; i < P_SENSOR_COMBS; ++i) {
-    P_readings.add(P_R[i]);
-  }
+      offset += snprintf(buffer + offset, sizeof(buffer) - offset, "P:[");
+      for (int i = 0; i < P_SENSOR_COMBS; ++i) {
+          offset += snprintf(buffer + offset, sizeof(buffer) - offset, "%hX%s", P_R[i], (i < P_SENSOR_COMBS - 1) ? "," : "");
+      }
+      offset += snprintf(buffer + offset, sizeof(buffer) - offset, "],");
 
-  doc["pump"] = pumpSp;
-  
-  serializeJson(doc, Serial);
+      offset += snprintf(buffer + offset, sizeof(buffer) - offset, "U:%u", pumpSp);
+
+      Serial.println(buffer);
+      Serial.flush();
+
+      xSemaphoreGive(serialMutex);
+    }
 }
 
 void reportDataTask(void* pvParameters){
   for (;;)
   {
-    sendDataAsJSON(T_STATE, T_READINGS, L_SENSOR_STATES, P_READINGS, pumpspeedLevel);
+    sendData(T_STATE, T_READINGS, L_SENSOR_STATES, P_READINGS, pumpspeedLevel);
     //Serial.printf("DBG: RDTFree %u byt\n", uxTaskGetStackHighWaterMark(NULL));
     vTaskDelay(LOG_INTERVAL);
   }
