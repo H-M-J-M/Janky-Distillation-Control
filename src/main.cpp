@@ -7,12 +7,14 @@
 #include <Adafruit_ADS1X15.h>
 
 //TASK INTERVALS
-#define LIQUID_SENSE_INTERVAL_MS pdMS_TO_TICKS(2000)
+#define LIQUID_SENSE_INTERVAL_MS pdMS_TO_TICKS(1250)
 #define BOILER_PUMP_INTERVAL_MS pdMS_TO_TICKS(500)
 #define TEMP_SENSE_INTERVAL_MS pdMS_TO_TICKS(3500)
 #define PRESS_SENSE_INTERVAL_MS pdMS_TO_TICKS(2000)
 #define PRESS_SENSE_TIME_MS pdMS_TO_TICKS(140)
 #define LOG_INTERVAL pdMS_TO_TICKS(2000)
+
+#define PUMP_RUN_TIME pdMS_TO_TICKS(150)
 
 #define PADC_ABS_GAIN GAIN_TWO
 #define PADC_DIFF_GAIN GAIN_FOUR
@@ -57,9 +59,9 @@ enum TEMPERATURE_STATE : uint8_t {HOT, GOOD, COLD};
 static TEMPERATURE_STATE T_STATE;
 constexpr float BOILER_TARGET_T = 100.f;
 constexpr float LOW_TEMP = 94.f;
-constexpr float HIGH_TEMP = 100.5f;
+constexpr float HIGH_TEMP = 101.f;
 constexpr int HEAT_CYCLE_TIME = pdMS_TO_TICKS(5000); //Total length of a heating cycle (ms)
-#define HEATER_MIN_DUTY_CYCLE 0.07f // these are used to set offsets for the proportional controller (i.e. the minimum duty cycle when the boiler is already hot)
+#define HEATER_MIN_DUTY_CYCLE 0.60f // these are used to set offsets for the proportional controller (i.e. the minimum duty cycle when the boiler is already hot)
 #define HEATER_MAX_DUTY_CYCLE 1.0f // (the maximum duty cycle when the boiler is cold)
 #define HEATER_P_GAIN ((HEATER_MAX_DUTY_CYCLE - HEATER_MIN_DUTY_CYCLE) / (BOILER_TARGET_T - LOW_TEMP))
 
@@ -207,12 +209,12 @@ void setup() {
   Serial.println("D: pressure adc initialized.");
 
   //Start Tasks
-  xTaskCreate(scanLSensorsTask, "scanLSensorsT", 8192, NULL, 8, &scanLSensorsTaskHandle);
-  xTaskCreate(boilerLevelTask, "boilerLevelT", 6144, NULL, 7, &boilerLevelTaskHandle);
-  xTaskCreate(readTProbesTask, "readTProbesT", 8192, NULL, 6, &readTProbesTaskHandle);
-  xTaskCreate(heaterControlTask, "heaterControlT", 6144, NULL, 5, &heaterControlTaskHandle);
-  xTaskCreate(readPressureSensorsTask, "readPSensorsT", 6144, NULL, 4, &readPressureSensorsTaskHandle);
-  xTaskCreate(reportDataTask, "reportDataT", 16384, NULL, 3, &reportDataTaskHandle);
+  xTaskCreate(scanLSensorsTask, "scanLSensorsT", 8192, NULL, 7, &scanLSensorsTaskHandle);
+  xTaskCreate(boilerLevelTask, "boilerLevelT", 6144, NULL, 8, &boilerLevelTaskHandle);
+  xTaskCreate(readTProbesTask, "readTProbesT", 8192, NULL, 5, &readTProbesTaskHandle);
+  xTaskCreate(heaterControlTask, "heaterControlT", 6144, NULL, 4, &heaterControlTaskHandle);
+  xTaskCreate(readPressureSensorsTask, "readPSensorsT", 6144, NULL, 3, &readPressureSensorsTaskHandle);
+  xTaskCreate(reportDataTask, "reportDataT", 16384, NULL, 6, &reportDataTaskHandle);
 }
 
 void loop() {
@@ -426,9 +428,13 @@ void boilerLevelTask(void* pvParameters){
       break;
     case 0b0000'1000: // 3 wet
       setPumpSpeed(1);
+      vTaskDelay(PUMP_RUN_TIME);
+      setPumpSpeed(0);
       break;
     case 0b0000'0000: // 4 wet
-      setPumpSpeed(3); 
+      setPumpSpeed(3);
+      vTaskDelay(PUMP_RUN_TIME);
+      setPumpSpeed(0); 
       break;
     default: // Default to OFF for safety
       setPumpSpeed(0);
@@ -461,6 +467,10 @@ void heaterControlTask(void* pvParameters){
         break;
       
       case HOT:
+        digitalWrite(HeatRelayPin, HIGH);
+        vTaskDelay(HEAT_CYCLE_TIME * 0.05);
+        digitalWrite(HeatRelayPin, LOW);
+        vTaskDelay(HEAT_CYCLE_TIME * 0.95);
       default:
         digitalWrite(HeatRelayPin, LOW);
         vTaskDelay(HEAT_CYCLE_TIME);
